@@ -238,7 +238,7 @@ class DB:
         import os
         
         # Прямой IP с портом (решает проблему DNS)
-        db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@66.33.22.226:36527/railway"
+        db_url = "postgresql://postgres:uxXpVtqwRBcSBHxAKOWROjZseUcIydPW@postgres-a-0y.railway.internal:5432/railway"
         
         print(f"🔌 Подключаюсь к PostgreSQL...")
         print(f"📡 Хост: 66.33.22.226:36527")
