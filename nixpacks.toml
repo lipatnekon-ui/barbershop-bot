@@ -1,2 +1,8 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip"]
+nixPkgs = ["python312"]
+
+[phases.install]
+cmds = ["python3.12 -m pip install --upgrade pip", "python3.12 -m pip install -r requirements.txt"]
+
+[start]
+cmd = "empire_v6.py"
