@@ -236,11 +236,16 @@ class DB:
 
     async def init(self):
         import os
+        
+        # Берем из переменной или используем прямую строку
         db_url = os.getenv("DATABASE_URL")
+        
         if not db_url:
-            logger.error("❌ DATABASE_URL не найден в переменных окружения")
-            raise ValueError("DATABASE_URL not set")
+            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@acela.proxy.rlwy.net:5432/railway"
+        
+        print(f"Подключаюсь к БД: {db_url[:50]}...")
         self.pool = await asyncpg.create_pool(db_url)
+        print("✅ БД подключена!")
 
 db = DB()
 
