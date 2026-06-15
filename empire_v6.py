@@ -2,7 +2,7 @@
 """
 👑 EMPIRE SAAS V16 — ULTIMATE EDITION (FIXED NAVIGATION)
 """
-import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp
+import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, socket
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -237,11 +237,14 @@ class DB:
     async def init(self):
         import os
         
-        # Прямой IP с портом (решает проблему DNS)
-        db_url = "postgresql://postgres:uxXpVtqwRBcSBHxAKOWROjZseUcIydPW@postgres-a-0y.railway.internal:5432/railway"
+        # Берем строку из переменной окружения
+        db_url = os.getenv("DATABASE_URL")
+        
+        if not db_url:
+            raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
         
         print(f"🔌 Подключаюсь к PostgreSQL...")
-        print(f"📡 Хост: 66.33.22.226:36527")
+        print(f"📡 Хост: {db_url.split('@')[1].split('/')[0] if '@' in db_url else 'unknown'}")
         
         self.pool = await asyncpg.create_pool(db_url, timeout=30)
         print("✅ БД подключена успешно!")
