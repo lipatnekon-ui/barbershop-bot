@@ -237,16 +237,27 @@ class DB:
     async def init(self):
         import os
         
-        # Сначала пробуем взять из переменной окружения
+        # Берем DATABASE_URL из переменных окружения
         db_url = os.getenv("DATABASE_URL")
         
-        # Если нет - используем правильный порт 36527
+        # Если нет - используем приватный эндпоинт Railway
         if not db_url:
-            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@acela.proxy.rlwy.net:36527/railway"
+            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@postgres.railway.internal:5432/railway"
         
-        print(f"Подключаюсь к БД: {db_url[:60]}...")
-        self.pool = await asyncpg.create_pool(db_url)
-        print("✅ БД подключена!")
+        print(f"🔌 Подключаюсь к PostgreSQL...")
+        
+        try:
+            self.pool = await asyncpg.create_pool(db_url, timeout=30)
+            print("✅ БД подключена успешно!")
+            
+            # Проверяем соединение
+            async with self.pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+                print("📡 Соединение с БД стабильно")
+                
+        except Exception as e:
+            print(f"❌ Ошибка подключения: {e}")
+            raise
 
 db = DB()
 
