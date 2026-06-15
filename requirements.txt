@@ -1,0 +1,6 @@
+aiogram==3.4.1
+asyncpg
+fastapi
+uvicorn
+aiohttp
+python-dotenv
