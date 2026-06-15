@@ -2,7 +2,7 @@
 """
 👑 EMPIRE SAAS V16 — ULTIMATE EDITION (FIXED NAVIGATION)
 """
-import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, socket
+import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -237,7 +237,7 @@ class DB:
     async def init(self):
         import os
         
-        # Берем строку из переменной окружения
+        # Берем строку подключения из переменной окружения
         db_url = os.getenv("DATABASE_URL")
         
         if not db_url:
