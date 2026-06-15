@@ -4,4 +4,3 @@ fastapi
 uvicorn
 aiohttp
 python-dotenv
-pydantic==1.10.13
