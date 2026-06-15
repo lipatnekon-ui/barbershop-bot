@@ -1006,6 +1006,8 @@ async def reminder_worker():
     while True:
         try:
             now_msk = datetime.now(MOSCOW_TZ)
+            now_naive = now_msk.replace(tzinfo=None)
+            
             async with db.pool.acquire() as c:
                 bookings = await c.fetch("""
                     SELECT b.*, m.name as master_name, s.name as service_name, comp.address
@@ -1015,7 +1017,7 @@ async def reminder_worker():
                     JOIN companies comp ON b.company_id = comp.id
                     WHERE b.start_time BETWEEN $1 AND $2
                     AND b.status='active' AND b.reminder_24h_sent = FALSE
-                """, now_msk, now_msk + timedelta(hours=24))
+                """, now_naive, now_naive + timedelta(hours=24))
                 for booking in bookings:
                     start_msk = booking['start_time'].astimezone(MOSCOW_TZ) if booking['start_time'].tzinfo else booking['start_time']
                     await bot.send_message(booking["client_id"], f"⏰ НАПОМИНАНИЕ!\n\nЗавтра в {start_msk.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}")
@@ -1029,6 +1031,9 @@ async def review_worker():
     while True:
         try:
             now_msk = datetime.now(MOSCOW_TZ)
+            now_naive = now_msk.replace(tzinfo=None)
+            one_hour_ago = (now_msk - timedelta(hours=1)).replace(tzinfo=None)
+            
             async with db.pool.acquire() as c:
                 bookings = await c.fetch("""
                     SELECT b.*, m.name as master_name, s.name as service_name
@@ -1037,7 +1042,7 @@ async def review_worker():
                     JOIN services s ON b.service_id = s.id
                     WHERE b.start_time < $1 AND b.end_time < $2
                     AND b.status='active' AND b.review_sent = FALSE
-                """, now_msk - timedelta(hours=1), now_msk)
+                """, one_hour_ago, now_naive)
                 for booking in bookings:
                     kb = InlineKeyboardBuilder()
                     for i in range(1, 6):
