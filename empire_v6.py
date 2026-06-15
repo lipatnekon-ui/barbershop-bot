@@ -237,27 +237,19 @@ class DB:
     async def init(self):
         import os
         
-        # Берем DATABASE_URL из переменных окружения
-        db_url = os.getenv("DATABASE_URL")
-        
-        # Если нет - используем приватный эндпоинт Railway
-        if not db_url:
-            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@postgres.railway.internal:5432/railway"
+        # Прямой IP с портом (решает проблему DNS)
+        db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@66.33.22.226:36527/railway"
         
         print(f"🔌 Подключаюсь к PostgreSQL...")
+        print(f"📡 Хост: 66.33.22.226:36527")
         
-        try:
-            self.pool = await asyncpg.create_pool(db_url, timeout=30)
-            print("✅ БД подключена успешно!")
-            
-            # Проверяем соединение
-            async with self.pool.acquire() as conn:
-                await conn.execute("SELECT 1")
-                print("📡 Соединение с БД стабильно")
-                
-        except Exception as e:
-            print(f"❌ Ошибка подключения: {e}")
-            raise
+        self.pool = await asyncpg.create_pool(db_url, timeout=30)
+        print("✅ БД подключена успешно!")
+        
+        # Проверяем соединение
+        async with self.pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+            print("📡 Соединение стабильно")
 
 db = DB()
 
