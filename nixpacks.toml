@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["python311"]
+nixPkgs = ["python312", "python312Packages.pip"]
