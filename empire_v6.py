@@ -237,27 +237,38 @@ class DB:
     async def init(self):
         import os
         
-        # Берем строку подключения из переменной окружения
         db_url = os.getenv("DATABASE_URL")
         
         if not db_url:
-            raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
+            raise ValueError("❌ DATABASE_URL не найден!")
         
-        # Добавляем SSL для публичного подключения
         if "proxy.rlwy.net" in db_url and "sslmode" not in db_url:
             db_url += "?sslmode=require"
             print("🔒 Добавлен SSL")
         
         print(f"🔌 Подключаюсь к PostgreSQL...")
-        print(f"📡 Хост: {db_url.split('@')[1].split('/')[0] if '@' in db_url else 'unknown'}")
-        
         self.pool = await asyncpg.create_pool(db_url, timeout=30)
-        print("✅ БД подключена успешно!")
+        print("✅ БД подключена!")
         
-        # Проверяем соединение
+        # СОЗДАЕМ ТАБЛИЦЫ
         async with self.pool.acquire() as conn:
-            await conn.execute("SELECT 1")
-            print("📡 Соединение стабильно")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users(id BIGINT PRIMARY KEY, role TEXT DEFAULT 'client', company_id INT, plan TEXT DEFAULT 'free', paid_until TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, name TEXT, owner_id BIGINT, invite_code TEXT UNIQUE, telegram TEXT DEFAULT '', address TEXT DEFAULT '', phone TEXT DEFAULT '');
+                CREATE TABLE IF NOT EXISTS masters(id SERIAL PRIMARY KEY, company_id INT, name TEXT, telegram_id BIGINT);
+                CREATE TABLE IF NOT EXISTS services(id SERIAL PRIMARY KEY, company_id INT, name TEXT, price INT, duration INT);
+                CREATE TABLE IF NOT EXISTS bookings(id SERIAL PRIMARY KEY, company_id INT, master_id INT, client_id BIGINT, service_id INT, start_time TIMESTAMP, end_time TIMESTAMP, status TEXT DEFAULT 'active', reminder_24h_sent BOOLEAN DEFAULT FALSE, reminder_2h_sent BOOLEAN DEFAULT FALSE, review_sent BOOLEAN DEFAULT FALSE);
+                CREATE TABLE IF NOT EXISTS revenue(id SERIAL PRIMARY KEY, company_id INT, user_id BIGINT, amount INT, plan TEXT, created_at TIMESTAMP DEFAULT NOW());
+                CREATE TABLE IF NOT EXISTS reviews(id SERIAL PRIMARY KEY, booking_id INT, client_id BIGINT, master_id INT, rating INT, comment TEXT, created_at TIMESTAMP DEFAULT NOW());
+            """)
+            
+            await conn.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE DEFAULT ''")
+            await conn.execute("ALTER TABLE masters ADD COLUMN IF NOT EXISTS telegram_id BIGINT DEFAULT NULL")
+            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE")
+            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN DEFAULT FALSE")
+            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS review_sent BOOLEAN DEFAULT FALSE")
+            
+            print("✅ Таблицы созданы!")
 
 db = DB()
 
@@ -856,7 +867,6 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
         start = datetime.combine(date_obj, datetime.min.time().replace(hour=hour))
         end = start + timedelta(hours=1)
         
-        # Проверка на прошлое
         now_msk = datetime.now(MOSCOW_TZ)
         if start.date() < now_msk.date() or (start.date() == now_msk.date() and start.hour <= now_msk.hour):
             await cb.answer("❌ Нельзя записаться в прошлое!", show_alert=True)
