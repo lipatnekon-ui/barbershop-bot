@@ -21,7 +21,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1"))
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119552067165")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@xmplo")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
