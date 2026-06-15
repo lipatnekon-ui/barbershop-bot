@@ -20,7 +20,6 @@ import uvicorn, re
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1"))
-DB_URL = os.getenv("DATABASE_URL")
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119552067165")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -236,23 +235,12 @@ class DB:
             return {"today": today_count, "week": week_count, "popular": popular["name"] if popular else "—", "popular_count": popular["cnt"] if popular else 0}
 
     async def init(self):
-        self.pool = await asyncpg.create_pool(DB_URL)
-        async with self.pool.acquire() as c:
-            await c.execute("""
-                CREATE TABLE IF NOT EXISTS users(id BIGINT PRIMARY KEY, role TEXT DEFAULT 'client', company_id INT, plan TEXT DEFAULT 'free', paid_until TIMESTAMP);
-                CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, name TEXT, owner_id BIGINT, invite_code TEXT UNIQUE, telegram TEXT DEFAULT '', address TEXT DEFAULT '', phone TEXT DEFAULT '');
-                CREATE TABLE IF NOT EXISTS masters(id SERIAL PRIMARY KEY, company_id INT, name TEXT, telegram_id BIGINT);
-                CREATE TABLE IF NOT EXISTS services(id SERIAL PRIMARY KEY, company_id INT, name TEXT, price INT, duration INT);
-                CREATE TABLE IF NOT EXISTS bookings(id SERIAL PRIMARY KEY, company_id INT, master_id INT, client_id BIGINT, service_id INT, start_time TIMESTAMP, end_time TIMESTAMP, status TEXT DEFAULT 'active', reminder_24h_sent BOOLEAN DEFAULT FALSE, reminder_2h_sent BOOLEAN DEFAULT FALSE, review_sent BOOLEAN DEFAULT FALSE);
-                CREATE TABLE IF NOT EXISTS revenue(id SERIAL PRIMARY KEY, company_id INT, user_id BIGINT, amount INT, plan TEXT, created_at TIMESTAMP DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS reviews(id SERIAL PRIMARY KEY, booking_id INT, client_id BIGINT, master_id INT, rating INT, comment TEXT, created_at TIMESTAMP DEFAULT NOW());
-            """)
-            await c.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE DEFAULT ''")
-            await c.execute("ALTER TABLE masters ADD COLUMN IF NOT EXISTS telegram_id BIGINT DEFAULT NULL")
-            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE")
-            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN DEFAULT FALSE")
-            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS review_sent BOOLEAN DEFAULT FALSE")
-            logger.info("✅ База данных инициализирована")
+        import os
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            logger.error("❌ DATABASE_URL не найден в переменных окружения")
+            raise ValueError("DATABASE_URL not set")
+        self.pool = await asyncpg.create_pool(db_url)
 
 db = DB()
 
