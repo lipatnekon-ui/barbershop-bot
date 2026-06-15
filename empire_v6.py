@@ -237,13 +237,14 @@ class DB:
     async def init(self):
         import os
         
-        # Берем из переменной или используем прямую строку
+        # Сначала пробуем взять из переменной окружения
         db_url = os.getenv("DATABASE_URL")
         
+        # Если нет - используем правильный порт 36527
         if not db_url:
-            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@acela.proxy.rlwy.net:5432/railway"
+            db_url = "postgresql://postgres:PyvqEVMSJQCTEvjoNmmHhRzqdaiKkjcD@acela.proxy.rlwy.net:36527/railway"
         
-        print(f"Подключаюсь к БД: {db_url[:50]}...")
+        print(f"Подключаюсь к БД: {db_url[:60]}...")
         self.pool = await asyncpg.create_pool(db_url)
         print("✅ БД подключена!")
 
