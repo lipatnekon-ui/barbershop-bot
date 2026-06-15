@@ -234,25 +234,26 @@ class DB:
             """, cid)
             return {"today": today_count, "week": week_count, "popular": popular["name"] if popular else "—", "popular_count": popular["cnt"] if popular else 0}
 
- async def init(self):
-    import os
-    
-    # Берем строку подключения из переменной окружения
-    db_url = os.getenv("DATABASE_URL")
-    
-    if not db_url:
-        raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
-    
-    # Добавляем SSL если это публичный адрес и нет sslmode
-    if "proxy.rlwy.net" in db_url and "sslmode" not in db_url:
-        db_url += "?sslmode=require"
-        print("🔒 Добавлен SSL для публичного подключения")
-    
-    print(f"🔌 Подключаюсь к PostgreSQL...")
-    print(f"📡 Хост: {db_url.split('@')[1].split('/')[0] if '@' in db_url else 'unknown'}")
-    
-    self.pool = await asyncpg.create_pool(db_url, timeout=30)
-    print("✅ БД подключена успешно!")
+    async def init(self):
+        import os
+        
+        # Берем строку подключения из переменной окружения
+        db_url = os.getenv("DATABASE_URL")
+        
+        if not db_url:
+            raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
+        
+        # Добавляем SSL для публичного подключения
+        if "proxy.rlwy.net" in db_url and "sslmode" not in db_url:
+            db_url += "?sslmode=require"
+            print("🔒 Добавлен SSL")
+        
+        print(f"🔌 Подключаюсь к PostgreSQL...")
+        print(f"📡 Хост: {db_url.split('@')[1].split('/')[0] if '@' in db_url else 'unknown'}")
+        
+        self.pool = await asyncpg.create_pool(db_url, timeout=30)
+        print("✅ БД подключена успешно!")
+        
         # Проверяем соединение
         async with self.pool.acquire() as conn:
             await conn.execute("SELECT 1")
