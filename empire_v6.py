@@ -1194,8 +1194,7 @@ async def main():
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
     
-    await asyncio.gather(
-        run_api(), 
+    await asyncio.gather( 
         dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     )
 
