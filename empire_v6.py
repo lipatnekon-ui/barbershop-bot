@@ -91,16 +91,6 @@ def back_kb():
     kb.button(text="⬅️ Назад", callback_data="main_menu")
     return kb.as_markup()
 
-def main_menu_kb(role):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📅 Записи", callback_data="bookings_screen")
-    kb.button(text="👨‍🔧 Мастера", callback_data="masters_screen")
-    kb.button(text="💈 Услуги", callback_data="services_screen")
-    kb.button(text="💳 Тариф", callback_data="billing_screen")
-    kb.button(text="📊 Аналитика", callback_data="analytics")
-    kb.adjust(1)
-    return kb.as_markup()
-
 def owner_menu(ctx):
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 Записи", callback_data="bookings_screen")
@@ -225,7 +215,7 @@ class DB:
 
     async def get_bookings_for_export(self, cid, days=30):
         async with self.pool.acquire() as c:
-            date_from = datetime.now(pytz_timezone(await self.get_company_timezone(cid))) - timedelta(days=days)
+            date_from = datetime.now() - timedelta(days=days)
             return await c.fetch("""
                 SELECT b.id, b.start_time, b.end_time, b.status,
                        m.name as master_name, s.name as service_name, s.price,
@@ -248,8 +238,7 @@ class DB:
 
     async def get_booking_stats(self, cid):
         async with self.pool.acquire() as c:
-            tz = pytz_timezone(await self.get_company_timezone(cid))
-            today = datetime.now(tz).date()
+            today = datetime.now().date()
             week_ago = today - timedelta(days=7)
             today_count = await c.fetchval("SELECT COUNT(*) FROM bookings WHERE company_id=$1 AND start_time::date = $2 AND status='active'", cid, today)
             week_count = await c.fetchval("SELECT COUNT(*) FROM bookings WHERE company_id=$1 AND start_time::date >= $2 AND status='active'", cid, week_ago)
@@ -934,12 +923,12 @@ async def book_master(cb: CallbackQuery, state: FSMContext, ctx: RequestContext)
     await cb.answer()
 
 @router.callback_query(BookFSM.service, F.data.startswith("s_"))
-async def book_date(cb: CallbackQuery, state: FSMContext):
+async def book_date(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     service_id = int(cb.data.split("_")[1])
     await state.update_data(service_id=service_id)
     await state.set_state(BookFSM.date)
     kb = InlineKeyboardBuilder()
-    tz = pytz_timezone(cb.data.get("ctx", {}).get("timezone", "Europe/Moscow"))
+    tz = pytz_timezone(ctx.timezone)
     now = datetime.now(tz)
     for i in range(14):
         day = now + timedelta(days=i)
@@ -950,12 +939,12 @@ async def book_date(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 @router.callback_query(BookFSM.date, F.data.startswith("date_"))
-async def book_time(cb: CallbackQuery, state: FSMContext):
+async def book_time(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     date_str = cb.data[5:]
     await state.update_data(date=date_str)
     await state.set_state(BookFSM.time)
     kb = InlineKeyboardBuilder()
-    tz = pytz_timezone(cb.data.get("ctx", {}).get("timezone", "Europe/Moscow"))
+    tz = pytz_timezone(ctx.timezone)
     now = datetime.now(tz)
     selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     for h in range(10, 19):
@@ -1124,12 +1113,10 @@ async def help_command(msg: Message, ctx: RequestContext):
 async def reminder_worker():
     while True:
         try:
-            # Получаем все компании с их часовыми поясами
             async with db.pool.acquire() as c:
                 companies = await c.fetch("SELECT id, timezone FROM companies")
                 for company in companies:
-                    tz = pytz_timezone(company["timezone"] if company["timezone"] else "Europe/Moscow")
-                    now = datetime.now(tz)
+                    now = datetime.now()
                     bookings = await c.fetch("""
                         SELECT b.*, m.name as master_name, s.name as service_name, comp.address, comp.timezone
                         FROM bookings b
@@ -1156,8 +1143,7 @@ async def review_worker():
             async with db.pool.acquire() as c:
                 companies = await c.fetch("SELECT id, timezone FROM companies")
                 for company in companies:
-                    tz = pytz_timezone(company["timezone"] if company["timezone"] else "Europe/Moscow")
-                    now = datetime.now(tz)
+                    now = datetime.now()
                     bookings = await c.fetch("""
                         SELECT b.*, m.name as master_name, s.name as service_name, comp.timezone
                         FROM bookings b
