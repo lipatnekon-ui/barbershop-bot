@@ -119,7 +119,7 @@ def master_menu():
 
 class ContextMiddleware(BaseMiddleware):
     def __init__(self, db):
-        self.db = db
+        self.db = db  # <-- теперь это объект DB
 
     async def __call__(self, handler, event, data):
         uid = event.from_user.id if hasattr(event, "from_user") else None
@@ -129,7 +129,7 @@ class ContextMiddleware(BaseMiddleware):
         if uid in USER_CACHE:
             data["ctx"] = USER_CACHE[uid]
         else:
-            user = await self.db.fetchrow("SELECT * FROM users WHERE id=$1", uid)
+            user = await self.db.get_user(uid)
             company = await self.db.get_company(user["company_id"]) if user and user["company_id"] else None
             ctx = RequestContext(
                 user_id=uid,
@@ -1178,8 +1178,11 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
-    dp.message.middleware(ContextMiddleware(db.pool))
-    dp.callback_query.middleware(ContextMiddleware(db.pool))
+    
+    # 🔥 ПЕРЕДАЁМ ОБЪЕКТ db, А НЕ db.pool
+    dp.message.middleware(ContextMiddleware(db))
+    dp.callback_query.middleware(ContextMiddleware(db))
+    
     asyncio.create_task(reminder_worker())
     asyncio.create_task(review_worker())
     logger.info("👑 EMPIRE SAAS V16 ULTIMATE ЗАПУЩЕН!")
