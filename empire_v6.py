@@ -362,23 +362,27 @@ async def today_schedule(msg: Message, ctx: RequestContext):
     if not access.can(ctx, "today"):
         await msg.answer("❌ Команда доступна на тарифах СТАРТ, ПРО, БИЗНЕС")
         return
+    
     async with db.pool.acquire() as c:
         master = await c.fetchrow("SELECT * FROM masters WHERE telegram_id=$1 AND company_id=$2", msg.from_user.id, ctx.company_id)
-    if not master:
-        await msg.answer("❌ Вы не добавлены как мастер в этой компании")
-        return
-    tz = pytz_timezone(ctx.timezone)
-    today = datetime.now(tz).date()
-    bookings = await c.fetch("""
-        SELECT b.*, s.name as service_name
-        FROM bookings b
-        JOIN services s ON b.service_id = s.id
-        WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
-        ORDER BY b.start_time
-    """, master["id"], today)
+        if not master:
+            await msg.answer("❌ Вы не добавлены как мастер в этой компании")
+            return
+        
+        tz = pytz_timezone(ctx.timezone)
+        today = datetime.now(tz).date()
+        bookings = await c.fetch("""
+            SELECT b.*, s.name as service_name
+            FROM bookings b
+            JOIN services s ON b.service_id = s.id
+            WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
+            ORDER BY b.start_time
+        """, master["id"], today)
+    
     if not bookings:
         await msg.answer(f"📅 Расписание на {today.strftime('%d.%m.%Y')}\n\nНет записей")
         return
+    
     text = f"📅 Расписание на {today.strftime('%d.%m.%Y')}\n\n"
     for b in bookings:
         start_tz = b['start_time'].astimezone(tz) if b['start_time'].tzinfo else b['start_time'].replace(tzinfo=tz)
@@ -968,7 +972,6 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
         tz = pytz_timezone(ctx.timezone)
         date_obj = datetime.strptime(data["date"], "%Y-%m-%d").date()
         start = datetime.combine(date_obj, datetime.min.time().replace(hour=hour))
-        start = tz.localize(start)
         end = start + timedelta(hours=1)
         
         now = datetime.now(tz)
@@ -1130,7 +1133,19 @@ async def reminder_worker():
                     for booking in bookings:
                         booking_tz = pytz_timezone(booking["timezone"] if booking["timezone"] else "Europe/Moscow")
                         start_tz = booking['start_time'].astimezone(booking_tz) if booking['start_time'].tzinfo else booking['start_time'].replace(tzinfo=booking_tz)
-                        await bot.send_message(booking["client_id"], f"⏰ НАПОМИНАНИЕ!\n\nЗавтра в {start_tz.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}")
+                        
+                        today = datetime.now(booking_tz).date()
+                        if start_tz.date() == today:
+                            day_word = "Сегодня"
+                        elif start_tz.date() == today + timedelta(days=1):
+                            day_word = "Завтра"
+                        else:
+                            day_word = start_tz.strftime("%d.%m")
+                        
+                        await bot.send_message(
+                            booking["client_id"],
+                            f"⏰ НАПОМИНАНИЕ!\n\n{day_word} в {start_tz.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}"
+                        )
                         await c.execute("UPDATE bookings SET reminder_24h_sent = TRUE WHERE id = $1", booking["id"])
             await asyncio.sleep(3600)
         except Exception as e:
@@ -1179,7 +1194,6 @@ async def main():
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
     
-    # 🔥 ПЕРЕДАЁМ ОБЪЕКТ db, А НЕ db.pool
     dp.message.middleware(ContextMiddleware(db))
     dp.callback_query.middleware(ContextMiddleware(db))
     
