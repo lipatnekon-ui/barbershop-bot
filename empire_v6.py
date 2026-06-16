@@ -1173,13 +1173,19 @@ async def run_api():
 async def main():
     global BOT_USERNAME
     await db.init()
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("✅ Webhook удалён, начинаю polling...")
+    
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
     dp.message.middleware(ContextMiddleware(db.pool))
     dp.callback_query.middleware(ContextMiddleware(db.pool))
+    
     asyncio.create_task(reminder_worker())
     asyncio.create_task(review_worker())
     asyncio.create_task(return_clients_worker())
+    
     logger.info("👑 EMPIRE SAAS V16 ULTIMATE ЗАПУЩЕН!")
     print(f"✅ Bot username: @{BOT_USERNAME}")
     print("💰 Тарифы: СТАРТ 490₽ | ПРО 990₽ | БИЗНЕС 1490₽")
@@ -1187,7 +1193,11 @@ async def main():
     print("🔄 Повтор записи работает")
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
-    await asyncio.gather(run_api(), dp.start_polling(bot))
+    
+    await asyncio.gather(
+        run_api(), 
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
