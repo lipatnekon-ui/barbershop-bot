@@ -35,7 +35,6 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 app = FastAPI(title="👑 EMPIRE SAAS V16")
 
-# Московское время
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
 PLAN_PRICES = {"free": 0, "start": 490, "pro": 990, "business": 1490}
@@ -108,7 +107,6 @@ class ContextMiddleware(BaseMiddleware):
         uid = event.from_user.id if hasattr(event, "from_user") else None
         if not uid:
             return await handler(event, data)
-        
         if uid in USER_CACHE:
             data["ctx"] = USER_CACHE[uid]
         else:
@@ -236,21 +234,15 @@ class DB:
 
     async def init(self):
         import os
-        
         db_url = os.getenv("DATABASE_URL")
-        
         if not db_url:
             raise ValueError("❌ DATABASE_URL не найден!")
-        
         if "proxy.rlwy.net" in db_url and "sslmode" not in db_url:
             db_url += "?sslmode=require"
             print("🔒 Добавлен SSL")
-        
         print(f"🔌 Подключаюсь к PostgreSQL...")
         self.pool = await asyncpg.create_pool(db_url, timeout=30)
         print("✅ БД подключена!")
-        
-        # СОЗДАЕМ ТАБЛИЦЫ
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users(id BIGINT PRIMARY KEY, role TEXT DEFAULT 'client', company_id INT, plan TEXT DEFAULT 'free', paid_until TIMESTAMP);
@@ -261,13 +253,11 @@ class DB:
                 CREATE TABLE IF NOT EXISTS revenue(id SERIAL PRIMARY KEY, company_id INT, user_id BIGINT, amount INT, plan TEXT, created_at TIMESTAMP DEFAULT NOW());
                 CREATE TABLE IF NOT EXISTS reviews(id SERIAL PRIMARY KEY, booking_id INT, client_id BIGINT, master_id INT, rating INT, comment TEXT, created_at TIMESTAMP DEFAULT NOW());
             """)
-            
             await conn.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE DEFAULT ''")
             await conn.execute("ALTER TABLE masters ADD COLUMN IF NOT EXISTS telegram_id BIGINT DEFAULT NULL")
             await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE")
             await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN DEFAULT FALSE")
             await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS review_sent BOOLEAN DEFAULT FALSE")
-            
             print("✅ Таблицы созданы!")
 
 db = DB()
@@ -333,10 +323,7 @@ async def get_gpt_advice(stats_text):
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                 json={
                     "model": "gpt-3.5-turbo",
-                    "messages": [{
-                        "role": "user",
-                        "content": f"Дай короткий совет владельцу барбершопа (1 предложение) на основе статистики: {stats_text}. Без воды, только дело."
-                    }],
+                    "messages": [{"role": "user", "content": f"Дай короткий совет владельцу барбершопа (1 предложение) на основе статистики: {stats_text}. Без воды, только дело."}],
                     "max_tokens": 100
                 }
             ) as resp:
@@ -347,7 +334,6 @@ async def get_gpt_advice(stats_text):
         logger.error(f"GPT error: {e}")
     return "Добавьте больше услуг и напоминайте клиентам о записи!"
 
-# ==================== КОМАНДЫ И CALLBACK'И ====================
 @router.message(Command("today"))
 async def today_schedule(msg: Message, ctx: RequestContext):
     if not access.can(ctx, "today"):
@@ -355,17 +341,17 @@ async def today_schedule(msg: Message, ctx: RequestContext):
         return
     async with db.pool.acquire() as c:
         master = await c.fetchrow("SELECT * FROM masters WHERE telegram_id=$1 AND company_id=$2", msg.from_user.id, ctx.company_id)
-    if not master:
-        await msg.answer("❌ Вы не добавлены как мастер в этой компании")
-        return
-    today = datetime.now(MOSCOW_TZ).date()
-    bookings = await c.fetch("""
-        SELECT b.*, s.name as service_name
-        FROM bookings b
-        JOIN services s ON b.service_id = s.id
-        WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
-        ORDER BY b.start_time
-    """, master["id"], today)
+        if not master:
+            await msg.answer("❌ Вы не добавлены как мастер в этой компании")
+            return
+        today = datetime.now(MOSCOW_TZ).date()
+        bookings = await c.fetch("""
+            SELECT b.*, s.name as service_name
+            FROM bookings b
+            JOIN services s ON b.service_id = s.id
+            WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
+            ORDER BY b.start_time
+        """, master["id"], today)
     if not bookings:
         await msg.answer(f"📅 Расписание на {today.strftime('%d.%m.%Y')}\n\nНет записей")
         return
@@ -411,7 +397,6 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
                     await msg.answer("✅ Вы автоматически присоединились к компании!")
     await db.create_user(ctx.user_id)
     await state.clear()
-    
     if ctx.company_id:
         company = await db.get_company(ctx.company_id)
         header = generate_header(company["name"], ctx.plan)
@@ -426,7 +411,6 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
         else:
             await msg.answer(f"{header}\n👇 Доступные действия:", reply_markup=client_menu())
         return
-    
     kb = InlineKeyboardBuilder()
     kb.button(text="🏪 Создать компанию", callback_data="create_company")
     kb.button(text="🔑 Войти по коду", callback_data="join_company")
@@ -537,7 +521,6 @@ async def edit_contacts_phone(msg: Message, state: FSMContext, ctx: RequestConte
     await state.clear()
     await msg.answer("✅ Контакты обновлены!", reply_markup=owner_menu(ctx))
 
-# ==================== ОСНОВНЫЕ ЭКРАНЫ ====================
 @router.callback_query(F.data == "main_menu")
 async def main_menu_screen(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     await state.clear()
@@ -702,82 +685,56 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
     if not access.can(ctx, "analytics"):
         await cb.answer("❌ Аналитика доступна на тарифах ПРО и БИЗНЕС", show_alert=True)
         return
-    
     async with db.pool.acquire() as c:
         stats = await db.get_booking_stats(ctx.company_id)
-        
         top_master = await c.fetchrow("""
-            SELECT m.name, COUNT(*) as cnt
-            FROM bookings b
+            SELECT m.name, COUNT(*) as cnt FROM bookings b
             JOIN masters m ON b.master_id = m.id
             WHERE b.company_id=$1 AND b.status='active'
-            GROUP BY m.name
-            ORDER BY cnt DESC
-            LIMIT 1
+            GROUP BY m.name ORDER BY cnt DESC LIMIT 1
         """, ctx.company_id)
-        
         peak_hour = await c.fetchrow("""
             SELECT EXTRACT(HOUR FROM start_time) as hour, COUNT(*) as cnt
-            FROM bookings
-            WHERE company_id=$1 AND status='active'
-            GROUP BY hour
-            ORDER BY cnt DESC
-            LIMIT 1
+            FROM bookings WHERE company_id=$1 AND status='active'
+            GROUP BY hour ORDER BY cnt DESC LIMIT 1
         """, ctx.company_id)
-        
         top_revenue = await c.fetchrow("""
-            SELECT m.name, SUM(s.price) as total
-            FROM bookings b
+            SELECT m.name, SUM(s.price) as total FROM bookings b
             JOIN masters m ON b.master_id = m.id
             JOIN services s ON b.service_id = s.id
             WHERE b.company_id=$1 AND b.status='active'
-            GROUP BY m.name
-            ORDER BY total DESC
-            LIMIT 1
+            GROUP BY m.name ORDER BY total DESC LIMIT 1
         """, ctx.company_id)
-        
         week_stats = await c.fetch("""
-            SELECT DATE(start_time) as day, COUNT(*) as cnt
-            FROM bookings
+            SELECT DATE(start_time) as day, COUNT(*) as cnt FROM bookings
             WHERE company_id=$1 AND status='active' AND start_time > NOW() - interval '7 days'
-            GROUP BY day
-            ORDER BY day
+            GROUP BY day ORDER BY day
         """, ctx.company_id)
-        
         rows = await db.get_revenue_by_company(ctx.company_id)
-    
     graph = ""
     for day in week_stats:
         bar = "█" * min(day["cnt"], 20)
         graph += f"{day['day'].strftime('%d.%m')}: {bar} {day['cnt']}\n"
-    
     text = f"📊 *УМНАЯ АНАЛИТИКА*\n\n"
     text += f"📅 Записей сегодня: {stats['today']}\n"
     text += f"📆 Записей за неделю: {stats['week']}\n"
     text += f"🔥 Популярная услуга: {stats['popular']} ({stats['popular_count']} зап.)\n"
-    
     if top_master:
         text += f"💪 Самый загруженный мастер: {top_master['name']} ({top_master['cnt']} зап.)\n"
-    
     if peak_hour:
         text += f"⏰ Час-пик: {int(peak_hour['hour'])}:00 ({peak_hour['cnt']} зап.)\n"
-    
     if top_revenue:
         text += f"💰 Самый прибыльный мастер: {top_revenue['name']} ({top_revenue['total']}₽)\n"
-    
     text += f"\n📈 *Динамика за неделю:*\n{graph}\n"
     text += f"\n💳 *Выручка по тарифам:*\n"
-    
     if rows:
         for r in rows:
             text += f"• {PLAN_NAMES.get(r['plan'], r['plan'])}: {r['revenue']}₽\n"
     else:
         text += "Нет данных\n"
-    
     stats_text = f"Записей сегодня {stats['today']}, за неделю {stats['week']}, популярная услуга {stats['popular']}"
     advice = await get_gpt_advice(stats_text)
     text += f"\n🧠 *Совет ИИ:* {advice}\n"
-    
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb())
     await cb.answer()
 
@@ -862,16 +819,13 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
             await cb.answer("❌ Сессия устарела. Начните заново", show_alert=True)
             await state.clear()
             return
-        
         date_obj = datetime.strptime(data["date"], "%Y-%m-%d").date()
         start = datetime.combine(date_obj, datetime.min.time().replace(hour=hour))
         end = start + timedelta(hours=1)
-        
         now_msk = datetime.now(MOSCOW_TZ)
         if start.date() < now_msk.date() or (start.date() == now_msk.date() and start.hour <= now_msk.hour):
             await cb.answer("❌ Нельзя записаться в прошлое!", show_alert=True)
             return
-        
         async with db.pool.acquire() as c:
             existing = await c.fetchval("SELECT id FROM bookings WHERE master_id=$1 AND start_time=$2 AND status='active'", data["master_id"], start)
             if existing:
@@ -885,7 +839,7 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
             """, ctx.company_id, data["master_id"], ctx.user_id, data["service_id"], start, end)
             if master["telegram_id"]:
                 try:
-                    await bot.send_message(master["telegram_id"], f"📅 НОВАЯ ЗАПИСЬ!\n\n💇 {service['name']}\n📅 {start.strftime('%d.%m.%Y %H:%M')}\n🆔 #{bid}")
+                    await bot.send_message(master["telegram_id"], f"📅 НОВАЯ ЗАПИСЬ!\n\n💇 {service['name']}\n📅 {start.strftime('%d.%m.%Y')} в {start.strftime('%H:%M')}\n🆔 #{bid}")
                 except:
                     pass
         await cb.message.edit_text(f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n\n🆔 #{bid}\n📅 {start.strftime('%d.%m.%Y')}\n⏰ {start.strftime('%H:%M')}", reply_markup=back_kb())
@@ -1007,7 +961,6 @@ async def reminder_worker():
         try:
             now_msk = datetime.now(MOSCOW_TZ)
             now_naive = now_msk.replace(tzinfo=None)
-            
             async with db.pool.acquire() as c:
                 bookings = await c.fetch("""
                     SELECT b.*, m.name as master_name, s.name as service_name, comp.address
@@ -1020,7 +973,9 @@ async def reminder_worker():
                 """, now_naive, now_naive + timedelta(hours=24))
                 for booking in bookings:
                     start_msk = booking['start_time'].astimezone(MOSCOW_TZ) if booking['start_time'].tzinfo else booking['start_time']
-                    await bot.send_message(booking["client_id"], f"⏰ НАПОМИНАНИЕ!\n\nЗавтра в {start_msk.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}")
+                    hours_left = int((booking['start_time'] - datetime.now()).total_seconds() / 3600)
+                    when = "Завтра" if hours_left >= 20 else "Сегодня"
+                    await bot.send_message(booking["client_id"], f"⏰ НАПОМИНАНИЕ!\n\n{when} в {start_msk.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}")
                     await c.execute("UPDATE bookings SET reminder_24h_sent = TRUE WHERE id = $1", booking["id"])
             await asyncio.sleep(3600)
         except Exception as e:
@@ -1033,7 +988,6 @@ async def review_worker():
             now_msk = datetime.now(MOSCOW_TZ)
             now_naive = now_msk.replace(tzinfo=None)
             one_hour_ago = (now_msk - timedelta(hours=1)).replace(tzinfo=None)
-            
             async with db.pool.acquire() as c:
                 bookings = await c.fetch("""
                     SELECT b.*, m.name as master_name, s.name as service_name
@@ -1073,10 +1027,6 @@ async def main():
     logger.info("👑 EMPIRE SAAS V16 ULTIMATE ЗАПУЩЕН!")
     print(f"✅ Bot username: @{BOT_USERNAME}")
     print("💰 Тарифы: СТАРТ 490₽ | ПРО 990₽ | БИЗНЕС 1490₽")
-    print("📊 Умная аналитика + графики + GPT-советы включены")
-    print("🔄 Повтор записи работает")
-    print("💈 Барбер сам добавляет услуги")
-    print("🕐 Московское время (UTC+3)")
     await asyncio.gather(run_api(), dp.start_polling(bot))
 
 if __name__ == "__main__":
