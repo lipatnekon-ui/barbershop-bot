@@ -1099,7 +1099,7 @@ async def contact(cb: CallbackQuery, ctx: RequestContext):
     telegram = company["telegram"] if company and company["telegram"] else "Не указан"
     address = company["address"] if company and company["address"] else "Не указан"
     phone = company["phone"] if company and company["phone"] else "Не указан"
-    await cb.message.edit_text(f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}\n📞 {phone}", reply_markup=back_kb())
+    await cb.message.edit_text(f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}", reply_markup=back_kb())
     await cb.answer()
 
 @router.message(Command("help"))
