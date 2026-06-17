@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-👑 EMPIRE SAAS V16 — ULTIMATE EDITION (С QR-КОДАМИ И АКТИВАЦИЕЙ)
+👑 BarberShop-Bot v1.1
 """
 import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz, qrcode
 from pytz import timezone as pytz_timezone
