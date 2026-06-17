@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-👑 EMPIRE SAAS V16 — ULTIMATE EDITION (С ПОДДЕРЖКОЙ ГОРОДОВ)
+👑 EMPIRE SAAS V16 — ULTIMATE EDITION (С QR-КОДАМИ)
 """
-import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz
+import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz, qrcode
 from pytz import timezone as pytz_timezone
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
@@ -16,6 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from io import BytesIO
 import uvicorn, re
 
 load_dotenv()
@@ -99,6 +100,7 @@ def owner_menu(ctx):
     kb.button(text="💳 Тарифы", callback_data="billing_screen")
     kb.button(text="📊 Аналитика", callback_data="analytics")
     kb.button(text="🔑 Код приглашения", callback_data="show_invite_code")
+    kb.button(text="📱 QR-код", callback_data="generate_qr")  # <-- НОВАЯ КНОПКА
     kb.button(text="✏️ Контакты компании", callback_data="edit_contacts")
     kb.button(text="📎 Экспорт CSV", callback_data="export_csv")
     kb.button(text="📞 Связаться с админом", callback_data="contact")
@@ -119,7 +121,7 @@ def master_menu():
 
 class ContextMiddleware(BaseMiddleware):
     def __init__(self, db):
-        self.db = db  # <-- теперь это объект DB
+        self.db = db
 
     async def __call__(self, handler, event, data):
         uid = event.from_user.id if hasattr(event, "from_user") else None
@@ -355,6 +357,51 @@ async def get_gpt_advice(stats_text):
     except Exception as e:
         logger.error(f"GPT error: {e}")
     return "Добавьте больше услуг и напоминайте клиентам о записи!"
+
+# ==================== QR-ГЕНЕРАЦИЯ ====================
+@router.callback_query(F.data == "generate_qr")
+async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
+    company = await db.get_company(ctx.company_id)
+    if not company:
+        await cb.answer("❌ Компания не найдена")
+        return
+    
+    invite_code = company["invite_code"]
+    if not invite_code:
+        await cb.answer("❌ Код приглашения не найден")
+        return
+    
+    qr_data = f"https://t.me/{BOT_USERNAME}?start={invite_code}"
+    
+    try:
+        # Генерируем QR
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Сохраняем в буфер
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        
+        await cb.message.answer_photo(
+            BufferedInputFile(buf.getvalue(), filename="qr.png"),
+            caption=f"📱 QR-код для вашего барбершопа\n\n"
+                    f"Клиенты сканируют и попадают в вашего бота.\n"
+                    f"Ссылка: {qr_data}\n\n"
+                    f"🔑 Код: `{invite_code}`",
+            reply_markup=back_kb()
+        )
+        await cb.answer()
+    except Exception as e:
+        logger.error(f"QR generation error: {e}")
+        await cb.answer("❌ Ошибка генерации QR-кода", show_alert=True)
 
 # ==================== КОМАНДЫ И CALLBACK'И ====================
 @router.message(Command("today"))
@@ -1099,7 +1146,7 @@ async def contact(cb: CallbackQuery, ctx: RequestContext):
     telegram = company["telegram"] if company and company["telegram"] else "Не указан"
     address = company["address"] if company and company["address"] else "Не указан"
     phone = company["phone"] if company and company["phone"] else "Не указан"
-    await cb.message.edit_text(f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}", reply_markup=back_kb())
+    await cb.message.edit_text(f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}\n📞 {phone}", reply_markup=back_kb())
     await cb.answer()
 
 @router.message(Command("help"))
