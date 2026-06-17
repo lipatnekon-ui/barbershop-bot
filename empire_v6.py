@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-👑 EMPIRE SAAS V16 — ULTIMATE EDITION (С QR-КОДАМИ)
+👑 EMPIRE SAAS V16 — ULTIMATE EDITION (С QR-КОДАМИ И АКТИВАЦИЕЙ)
 """
 import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz, qrcode
 from pytz import timezone as pytz_timezone
@@ -100,7 +100,7 @@ def owner_menu(ctx):
     kb.button(text="💳 Тарифы", callback_data="billing_screen")
     kb.button(text="📊 Аналитика", callback_data="analytics")
     kb.button(text="🔑 Код приглашения", callback_data="show_invite_code")
-    kb.button(text="📱 QR-код", callback_data="generate_qr")  # <-- НОВАЯ КНОПКА
+    kb.button(text="📱 QR-код", callback_data="generate_qr")
     kb.button(text="✏️ Контакты компании", callback_data="edit_contacts")
     kb.button(text="📎 Экспорт CSV", callback_data="export_csv")
     kb.button(text="📞 Связаться с админом", callback_data="contact")
@@ -374,7 +374,6 @@ async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
     qr_data = f"https://t.me/{BOT_USERNAME}?start={invite_code}"
     
     try:
-        # Генерируем QR
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -385,7 +384,6 @@ async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
         
-        # Сохраняем в буфер
         buf = BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
@@ -402,6 +400,75 @@ async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
     except Exception as e:
         logger.error(f"QR generation error: {e}")
         await cb.answer("❌ Ошибка генерации QR-кода", show_alert=True)
+
+# ==================== АКТИВАЦИЯ ПОДПИСОК (АДМИН-КОМАНДА) ====================
+@router.message(Command("activate"))
+async def activate_plan(msg: Message):
+    # Проверяем, что это админ
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("❌ У вас нет прав для этой команды.")
+        return
+    
+    # Разбираем аргументы: /activate user_id plan
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.answer("❌ Использование: /activate user_id plan\nПример: /activate 123456789 pro\n\nДоступные тарифы: start, pro, business")
+        return
+    
+    try:
+        user_id = int(args[1])
+        plan = args[2].lower()
+        
+        if plan not in ["start", "pro", "business"]:
+            await msg.answer("❌ Неверный тариф. Доступны: start, pro, business")
+            return
+        
+        # Активируем подписку в БД
+        async with db.pool.acquire() as c:
+            result = await c.execute(
+                "UPDATE users SET plan = $1, paid_until = NOW() + interval '1 month' WHERE id = $2",
+                plan, user_id
+            )
+            
+            # Проверяем, обновилось ли
+            user = await c.fetchrow("SELECT plan, paid_until FROM users WHERE id = $1", user_id)
+            if not user:
+                await msg.answer(f"❌ Пользователь с ID {user_id} не найден в базе")
+                return
+        
+        # Очищаем кеш для этого пользователя, чтобы он сразу увидел изменения
+        if user_id in USER_CACHE:
+            del USER_CACHE[user_id]
+        
+        # Уведомление админу
+        plan_names = {"start": "СТАРТ", "pro": "ПРО", "business": "БИЗНЕС"}
+        await msg.answer(
+            f"✅ Тариф **{plan_names.get(plan, plan.upper())}** активирован для пользователя {user_id}\n"
+            f"📅 Действует до: {user['paid_until'].strftime('%d.%m.%Y') if user['paid_until'] else 'не указано'}"
+        )
+        
+        # Уведомление клиенту
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 Поздравляем! Ваш тариф обновлён до **{plan_names.get(plan, plan.upper())}**!\n\n"
+                f"📅 Подписка активна до: **{user['paid_until'].strftime('%d.%m.%Y') if user['paid_until'] else 'не указано'}**\n\n"
+                f"Теперь вам доступны все функции тарифа:\n"
+                f"• {'📊 Аналитика' if plan in ['pro', 'business'] else ''}\n"
+                f"• {'📎 Экспорт данных' if plan == 'business' else ''}\n"
+                f"• {'👨‍🔧 Неограниченное число мастеров' if plan == 'business' else f'👨‍🔧 До {MASTER_LIMITS.get(plan, 0)} мастеров'}\n\n"
+                f"Спасибо, что выбираете нас! 💪"
+            )
+            logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            await msg.answer(f"⚠️ Тариф активирован, но не удалось отправить уведомление пользователю. Возможно, он ещё не писал боту.")
+        
+    except ValueError:
+        await msg.answer("❌ Неверный формат ID. Используйте: /activate 123456789 pro")
+    except Exception as e:
+        logger.error(f"Ошибка активации: {e}")
+        await msg.answer(f"❌ Ошибка при активации: {e}")
 
 # ==================== КОМАНДЫ И CALLBACK'И ====================
 @router.message(Command("today"))
