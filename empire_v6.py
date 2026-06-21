@@ -362,40 +362,6 @@ async def get_gpt_advice(stats_text):
         logger.error(f"GPT error: {e}")
     return "Добавьте больше услуг и напоминайте клиентам о записи!"
 
-async def get_deepseek_response(prompt):
-    """Функция для DeepSeek API - более умная и дешевая альтернатива GPT"""
-    if not DEEPSEEK_API_KEY:
-        return "⚠️ DeepSeek API не настроен. Добавьте DEEPSEEK_API_KEY в переменные окружения."
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {"role": "system", "content": "Ты профессиональный консультант барбершопа. Отвечай кратко, полезно и по делу."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_tokens": 500,
-                    "temperature": 0.7
-                }
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"DeepSeek API error {resp.status}: {error_text}")
-                    return f"❌ Ошибка API: {resp.status}"
-    except Exception as e:
-        logger.error(f"DeepSeek error: {e}")
-        return "❌ Ошибка соединения с DeepSeek"
-
 # ==================== КОМАНДЫ И CALLBACK'И ====================
 @router.message(Command("today"))
 async def today_schedule(msg: Message, ctx: RequestContext):
