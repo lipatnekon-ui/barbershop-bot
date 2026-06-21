@@ -23,7 +23,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "1"))
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119552067165")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@barbershop_owner")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+# - DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "") error 494 - xz che za xyunya
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
     raise ValueError("❌ Неверный BOT_TOKEN")
@@ -328,7 +328,7 @@ def generate_header(company_name, current_plan):
     limit = PLAN_LIMITS.get(current_plan, 0)
     return f"👑 EMPIRE SAAS\n🏢 {company_name}\n📊 Тариф: {plan_name}\n📈 Лимит: {limit} записей/мес"
 
-# ==================== AI ФУНКЦИИ ====================
+# ==================== AI ФУНКЦИИ ==================== ya pidor kstati esli cho pishi ))
 async def get_gpt_advice(stats_text):
     if not OPENAI_API_KEY:
         return "Добавьте API ключ OpenAI в .env для получения советов"
@@ -1303,7 +1303,7 @@ async def main():
     print("🔄 Повтор записи работает")
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
-    print("🤖 DeepSeek AI интегрирован!")
+    print("🤖 DeepSeek AI интегрирован! - no nixya ne rabotaet kanatka avstraliskaya")
     await asyncio.gather(run_api(), dp.start_polling(bot))
 
 if __name__ == "__main__":
