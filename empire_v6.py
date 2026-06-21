@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-👑 EMPIRE SAAS V16 — ULTIMATE EDITION (FIXED NAVIGATION)
+👑 EMPIRE SAAS V16 — ULTIMATE EDITION (AI-СОВЕТЫ ВЫКЛЮЧЕНЫ)
 """
-import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp
+import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz, qrcode
+from pytz import timezone as pytz_timezone
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -15,15 +16,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from io import BytesIO
 import uvicorn, re
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1"))
+DB_URL = os.getenv("DATABASE_URL")
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119552067165")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@barbershop_owner")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-# - DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "") error 494 - xz che za xyunya
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
     raise ValueError("❌ Неверный BOT_TOKEN")
@@ -36,8 +38,32 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 app = FastAPI(title="👑 EMPIRE SAAS V16")
 
-# Московское время
+# Московское время (по умолчанию)
 MOSCOW_TZ = timezone(timedelta(hours=3))
+
+# Словарь городов и их часовых поясов
+TIMEZONE_MAP = {
+    "Москва": "Europe/Moscow",
+    "Санкт-Петербург": "Europe/Moscow",
+    "Саратов": "Europe/Saratov",
+    "Самара": "Europe/Samara",
+    "Екатеринбург": "Asia/Yekaterinburg",
+    "Новосибирск": "Asia/Novosibirsk",
+    "Красноярск": "Asia/Krasnoyarsk",
+    "Иркутск": "Asia/Irkutsk",
+    "Владивосток": "Asia/Vladivostok",
+    "Калининград": "Europe/Kaliningrad",
+    "Казань": "Europe/Moscow",
+    "Нижний Новгород": "Europe/Moscow",
+    "Ростов-на-Дону": "Europe/Moscow",
+    "Краснодар": "Europe/Moscow",
+    "Воронеж": "Europe/Moscow",
+    "Пермь": "Asia/Yekaterinburg",
+    "Уфа": "Asia/Yekaterinburg",
+    "Омск": "Asia/Omsk",
+    "Томск": "Asia/Tomsk",
+    "Хабаровск": "Asia/Vladivostok",
+}
 
 PLAN_PRICES = {"free": 0, "start": 490, "pro": 990, "business": 1490}
 PLAN_NAMES = {"free": "FREE", "start": "СТАРТ", "pro": "ПРО", "business": "БИЗНЕС"}
@@ -59,20 +85,11 @@ class RequestContext:
     company_id: int = None
     role: str = "client"
     plan: str = "free"
+    timezone: str = "Europe/Moscow"
 
 def back_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="main_menu")
-    return kb.as_markup()
-
-def main_menu_kb(role):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📅 Записи", callback_data="bookings_screen")
-    kb.button(text="👨‍🔧 Мастера", callback_data="masters_screen")
-    kb.button(text="💈 Услуги", callback_data="services_screen")
-    kb.button(text="💳 Тариф", callback_data="billing_screen")
-    kb.button(text="📊 Аналитика", callback_data="analytics")
-    kb.adjust(1)
     return kb.as_markup()
 
 def owner_menu(ctx):
@@ -82,10 +99,8 @@ def owner_menu(ctx):
     kb.button(text="💈 Услуги", callback_data="services_screen")
     kb.button(text="💳 Тарифы", callback_data="billing_screen")
     kb.button(text="📊 Аналитика", callback_data="analytics")
-    kb.button(text="👥 Клиенты", callback_data="clients_analytics")
-    kb.button(text="🏆 Рейтинг мастеров", callback_data="masters_rating")
-    kb.button(text="🤖 AI Совет", callback_data="ai_advice")
     kb.button(text="🔑 Код приглашения", callback_data="show_invite_code")
+    kb.button(text="📱 QR-код", callback_data="generate_qr")
     kb.button(text="✏️ Контакты компании", callback_data="edit_contacts")
     kb.button(text="📎 Экспорт CSV", callback_data="export_csv")
     kb.button(text="📞 Связаться с админом", callback_data="contact")
@@ -96,7 +111,6 @@ def client_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 Записаться", callback_data="bookings_screen")
     kb.button(text="📞 Контакты", callback_data="contact")
-    kb.button(text="🤖 Спросить AI", callback_data="client_ai")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -117,12 +131,14 @@ class ContextMiddleware(BaseMiddleware):
         if uid in USER_CACHE:
             data["ctx"] = USER_CACHE[uid]
         else:
-            user = await self.db.fetchrow("SELECT * FROM users WHERE id=$1", uid)
+            user = await self.db.get_user(uid)
+            company = await self.db.get_company(user["company_id"]) if user and user["company_id"] else None
             ctx = RequestContext(
                 user_id=uid,
                 company_id=user["company_id"] if user else None,
                 role=user["role"] if user else "client",
-                plan=user["plan"] if user else "free"
+                plan=user["plan"] if user else "free",
+                timezone=company["timezone"] if company and company.get("timezone") else "Europe/Moscow"
             )
             USER_CACHE[uid] = ctx
             data["ctx"] = ctx
@@ -140,13 +156,13 @@ class DB:
         async with self.pool.acquire() as c:
             await c.execute("INSERT INTO users(id) VALUES($1) ON CONFLICT DO NOTHING", uid)
 
-    async def create_company(self, name, owner_id, owner_username="", telegram="", address="", phone=""):
+    async def create_company(self, name, owner_id, owner_username="", telegram="", address="", phone="", timezone="Europe/Moscow"):
         async with self.pool.acquire() as c:
             invite_code = secrets.token_urlsafe(8)
             cid = await c.fetchval("""
-                INSERT INTO companies(name, owner_id, telegram, address, phone, invite_code)
-                VALUES($1, $2, $3, $4, $5, $6) RETURNING id
-            """, name, owner_id, telegram, address, phone, invite_code)
+                INSERT INTO companies(name, owner_id, telegram, address, phone, invite_code, timezone)
+                VALUES($1, $2, $3, $4, $5, $6, $7) RETURNING id
+            """, name, owner_id, telegram, address, phone, invite_code, timezone)
             await c.execute("UPDATE users SET company_id=$1, role='owner' WHERE id=$2", cid, owner_id)
             for svc in [("Стрижка", 800, 30), ("Борода", 500, 20), ("Комплекс", 1200, 45)]:
                 await c.execute("INSERT INTO services(company_id, name, price, duration) VALUES($1,$2,$3,$4)", cid, svc[0], svc[1], svc[2])
@@ -201,7 +217,7 @@ class DB:
 
     async def get_bookings_for_export(self, cid, days=30):
         async with self.pool.acquire() as c:
-            date_from = datetime.now(MOSCOW_TZ) - timedelta(days=days)
+            date_from = datetime.now() - timedelta(days=days)
             return await c.fetch("""
                 SELECT b.id, b.start_time, b.end_time, b.status,
                        m.name as master_name, s.name as service_name, s.price,
@@ -224,7 +240,7 @@ class DB:
 
     async def get_booking_stats(self, cid):
         async with self.pool.acquire() as c:
-            today = datetime.now(MOSCOW_TZ).date()
+            today = datetime.now().date()
             week_ago = today - timedelta(days=7)
             today_count = await c.fetchval("SELECT COUNT(*) FROM bookings WHERE company_id=$1 AND start_time::date = $2 AND status='active'", cid, today)
             week_count = await c.fetchval("SELECT COUNT(*) FROM bookings WHERE company_id=$1 AND start_time::date >= $2 AND status='active'", cid, week_ago)
@@ -239,41 +255,30 @@ class DB:
             """, cid)
             return {"today": today_count, "week": week_count, "popular": popular["name"] if popular else "—", "popular_count": popular["cnt"] if popular else 0}
 
+    async def get_company_timezone(self, cid):
+        async with self.pool.acquire() as c:
+            row = await c.fetchval("SELECT timezone FROM companies WHERE id=$1", cid)
+            return row if row else "Europe/Moscow"
+
     async def init(self):
-        import os
-        
-        db_url = os.getenv("DATABASE_URL")
-        
-        if not db_url:
-            raise ValueError("❌ DATABASE_URL не найден!")
-        
-        if "proxy.rlwy.net" in db_url and "sslmode" not in db_url:
-            db_url += "?sslmode=require"
-            print("🔒 Добавлен SSL")
-        
-        print(f"🔌 Подключаюсь к PostgreSQL...")
-        self.pool = await asyncpg.create_pool(db_url, timeout=30)
-        print("✅ БД подключена!")
-        
-        # СОЗДАЕМ ТАБЛИЦЫ
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
+        self.pool = await asyncpg.create_pool(DB_URL)
+        async with self.pool.acquire() as c:
+            await c.execute("""
                 CREATE TABLE IF NOT EXISTS users(id BIGINT PRIMARY KEY, role TEXT DEFAULT 'client', company_id INT, plan TEXT DEFAULT 'free', paid_until TIMESTAMP);
-                CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, name TEXT, owner_id BIGINT, invite_code TEXT UNIQUE, telegram TEXT DEFAULT '', address TEXT DEFAULT '', phone TEXT DEFAULT '');
+                CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, name TEXT, owner_id BIGINT, invite_code TEXT UNIQUE, telegram TEXT DEFAULT '', address TEXT DEFAULT '', phone TEXT DEFAULT '', timezone TEXT DEFAULT 'Europe/Moscow');
                 CREATE TABLE IF NOT EXISTS masters(id SERIAL PRIMARY KEY, company_id INT, name TEXT, telegram_id BIGINT);
                 CREATE TABLE IF NOT EXISTS services(id SERIAL PRIMARY KEY, company_id INT, name TEXT, price INT, duration INT);
                 CREATE TABLE IF NOT EXISTS bookings(id SERIAL PRIMARY KEY, company_id INT, master_id INT, client_id BIGINT, service_id INT, start_time TIMESTAMP, end_time TIMESTAMP, status TEXT DEFAULT 'active', reminder_24h_sent BOOLEAN DEFAULT FALSE, reminder_2h_sent BOOLEAN DEFAULT FALSE, review_sent BOOLEAN DEFAULT FALSE);
                 CREATE TABLE IF NOT EXISTS revenue(id SERIAL PRIMARY KEY, company_id INT, user_id BIGINT, amount INT, plan TEXT, created_at TIMESTAMP DEFAULT NOW());
                 CREATE TABLE IF NOT EXISTS reviews(id SERIAL PRIMARY KEY, booking_id INT, client_id BIGINT, master_id INT, rating INT, comment TEXT, created_at TIMESTAMP DEFAULT NOW());
             """)
-            
-            await conn.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE DEFAULT ''")
-            await conn.execute("ALTER TABLE masters ADD COLUMN IF NOT EXISTS telegram_id BIGINT DEFAULT NULL")
-            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE")
-            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN DEFAULT FALSE")
-            await conn.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS review_sent BOOLEAN DEFAULT FALSE")
-            
-            print("✅ Таблицы созданы!")
+            await c.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE DEFAULT ''")
+            await c.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Moscow'")
+            await c.execute("ALTER TABLE masters ADD COLUMN IF NOT EXISTS telegram_id BIGINT DEFAULT NULL")
+            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE")
+            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN DEFAULT FALSE")
+            await c.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS review_sent BOOLEAN DEFAULT FALSE")
+            logger.info("✅ База данных инициализирована")
 
 db = DB()
 
@@ -302,6 +307,7 @@ class BookFSM(StatesGroup):
 
 class Onboarding(StatesGroup):
     company_name = State()
+    company_city = State()
     company_telegram = State()
     company_address = State()
     company_phone = State()
@@ -328,39 +334,107 @@ def generate_header(company_name, current_plan):
     limit = PLAN_LIMITS.get(current_plan, 0)
     return f"👑 EMPIRE SAAS\n🏢 {company_name}\n📊 Тариф: {plan_name}\n📈 Лимит: {limit} записей/мес"
 
-# ==================== AI ФУНКЦИИ ==================== ya pidor kstati esli cho pishi ))
-async def get_gpt_advice(stats_text):
-    if not OPENAI_API_KEY:
-        return "Добавьте API ключ OpenAI в .env для получения советов"
+# ==================== QR-ГЕНЕРАЦИЯ ====================
+@router.callback_query(F.data == "generate_qr")
+async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
+    company = await db.get_company(ctx.company_id)
+    if not company:
+        await cb.answer("❌ Компания не найдена")
+        return
+    
+    invite_code = company["invite_code"]
+    if not invite_code:
+        await cb.answer("❌ Код приглашения не найден")
+        return
+    
+    qr_data = f"https://t.me/{BOT_USERNAME}?start={invite_code}"
+    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [{
-                        "role": "user",
-                        "content": f"""
-Ты консультант барбершопов.
-
-Дай 3 конкретных рекомендации.
-
-Статистика:
-{stats_text}
-
-Ответ максимум 120 слов.
-"""
-                    }],
-                    "max_tokens": 200
-                }
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        
+        await cb.message.answer_photo(
+            BufferedInputFile(buf.getvalue(), filename="qr.png"),
+            caption=f"📱 QR-код для вашего барбершопа\n\n"
+                    f"Клиенты сканируют и попадают в вашего бота.\n"
+                    f"Ссылка: {qr_data}\n\n"
+                    f"🔑 Код: `{invite_code}`",
+            reply_markup=back_kb()
+        )
+        await cb.answer()
     except Exception as e:
-        logger.error(f"GPT error: {e}")
-    return "Добавьте больше услуг и напоминайте клиентам о записи!"
+        logger.error(f"QR generation error: {e}")
+        await cb.answer("❌ Ошибка генерации QR-кода", show_alert=True)
+
+# ==================== АКТИВАЦИЯ ПОДПИСОК (АДМИН-КОМАНДА) ====================
+@router.message(Command("activate"))
+async def activate_plan(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("❌ У вас нет прав для этой команды.")
+        return
+    
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.answer("❌ Использование: /activate user_id plan\nПример: /activate 123456789 pro\n\nДоступные тарифы: start, pro, business")
+        return
+    
+    try:
+        user_id = int(args[1])
+        plan = args[2].lower()
+        
+        if plan not in ["start", "pro", "business"]:
+            await msg.answer("❌ Неверный тариф. Доступны: start, pro, business")
+            return
+        
+        async with db.pool.acquire() as c:
+            await c.execute(
+                "UPDATE users SET plan = $1, paid_until = NOW() + interval '1 month' WHERE id = $2",
+                plan, user_id
+            )
+            
+            user = await c.fetchrow("SELECT plan, paid_until FROM users WHERE id = $1", user_id)
+            if not user:
+                await msg.answer(f"❌ Пользователь с ID {user_id} не найден в базе")
+                return
+        
+        if user_id in USER_CACHE:
+            del USER_CACHE[user_id]
+        
+        plan_names = {"start": "СТАРТ", "pro": "ПРО", "business": "БИЗНЕС"}
+        await msg.answer(
+            f"✅ Тариф **{plan_names.get(plan, plan.upper())}** активирован для пользователя {user_id}\n"
+            f"📅 Действует до: {user['paid_until'].strftime('%d.%m.%Y') if user['paid_until'] else 'не указано'}"
+        )
+        
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 Поздравляем! Ваш тариф обновлён до **{plan_names.get(plan, plan.upper())}**!\n\n"
+                f"📅 Подписка активна до: **{user['paid_until'].strftime('%d.%m.%Y') if user['paid_until'] else 'не указано'}**\n\n"
+                f"Теперь вам доступны все функции тарифа!\n\n"
+                f"Спасибо, что выбираете нас! 💪"
+            )
+            logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            await msg.answer(f"⚠️ Тариф активирован, но не удалось отправить уведомление пользователю.")
+        
+    except ValueError:
+        await msg.answer("❌ Неверный формат ID. Используйте: /activate 123456789 pro")
+    except Exception as e:
+        logger.error(f"Ошибка активации: {e}")
+        await msg.answer(f"❌ Ошибка при активации: {e}")
 
 # ==================== КОМАНДЫ И CALLBACK'И ====================
 @router.message(Command("today"))
@@ -368,26 +442,31 @@ async def today_schedule(msg: Message, ctx: RequestContext):
     if not access.can(ctx, "today"):
         await msg.answer("❌ Команда доступна на тарифах СТАРТ, ПРО, БИЗНЕС")
         return
+    
     async with db.pool.acquire() as c:
         master = await c.fetchrow("SELECT * FROM masters WHERE telegram_id=$1 AND company_id=$2", msg.from_user.id, ctx.company_id)
-    if not master:
-        await msg.answer("❌ Вы не добавлены как мастер в этой компании")
-        return
-    today = datetime.now(MOSCOW_TZ).date()
-    bookings = await c.fetch("""
-        SELECT b.*, s.name as service_name
-        FROM bookings b
-        JOIN services s ON b.service_id = s.id
-        WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
-        ORDER BY b.start_time
-    """, master["id"], today)
+        if not master:
+            await msg.answer("❌ Вы не добавлены как мастер в этой компании")
+            return
+        
+        tz = pytz_timezone(ctx.timezone)
+        today = datetime.now(tz).date()
+        bookings = await c.fetch("""
+            SELECT b.*, s.name as service_name
+            FROM bookings b
+            JOIN services s ON b.service_id = s.id
+            WHERE b.master_id=$1 AND b.start_time::date = $2 AND b.status='active'
+            ORDER BY b.start_time
+        """, master["id"], today)
+    
     if not bookings:
         await msg.answer(f"📅 Расписание на {today.strftime('%d.%m.%Y')}\n\nНет записей")
         return
+    
     text = f"📅 Расписание на {today.strftime('%d.%m.%Y')}\n\n"
     for b in bookings:
-        start_msk = b['start_time'].astimezone(MOSCOW_TZ) if b['start_time'].tzinfo else b['start_time']
-        text += f"⏰ {start_msk.strftime('%H:%M')} — {b['service_name']}\n"
+        start_tz = b['start_time'].astimezone(tz) if b['start_time'].tzinfo else b['start_time'].replace(tzinfo=tz)
+        text += f"⏰ {start_tz.strftime('%H:%M')} — {b['service_name']}\n"
     await msg.answer(text)
 
 @router.callback_query(F.data == "today_schedule")
@@ -422,7 +501,14 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
                 if company:
                     await db.join_company(ctx.user_id, company["invite_code"])
                     user = await db.get_user(ctx.user_id)
-                    USER_CACHE[ctx.user_id] = RequestContext(user_id=ctx.user_id, company_id=user["company_id"], role=user["role"], plan=user["plan"])
+                    comp = await db.get_company(user["company_id"])
+                    USER_CACHE[ctx.user_id] = RequestContext(
+                        user_id=ctx.user_id,
+                        company_id=user["company_id"],
+                        role=user["role"],
+                        plan=user["plan"],
+                        timezone=comp["timezone"] if comp else "Europe/Moscow"
+                    )
                     await msg.answer("✅ Вы автоматически присоединились к компании!")
     await db.create_user(ctx.user_id)
     await state.clear()
@@ -463,8 +549,63 @@ async def create_company_name(msg: Message, state: FSMContext):
         await msg.answer("❌ Название от 2 до 50 символов")
         return
     await state.update_data(company_name=msg.text.strip())
+    await state.set_state(Onboarding.company_city)
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📍 Москва", callback_data="city_Москва")
+    kb.button(text="📍 Саратов", callback_data="city_Саратов")
+    kb.button(text="📍 Самара", callback_data="city_Самара")
+    kb.button(text="📍 Екатеринбург", callback_data="city_Екатеринбург")
+    kb.button(text="📍 Новосибирск", callback_data="city_Новосибирск")
+    kb.button(text="📍 Другой город", callback_data="city_other")
+    kb.adjust(2)
+    
+    await msg.answer(
+        "🌍 Выберите город, в котором работает ваш барбершоп:\n\n"
+        "Это нужно для правильного отображения времени записи.",
+        reply_markup=kb.as_markup()
+    )
+
+@router.callback_query(F.data.startswith("city_"))
+async def create_company_city(cb: CallbackQuery, state: FSMContext):
+    city = cb.data.split("_")[1]
+    if city == "other":
+        await state.set_state(Onboarding.company_city)
+        await cb.message.edit_text(
+            "🌍 Введите название вашего города:\n\n"
+            "Например: Казань, Краснодар, Владивосток",
+            reply_markup=back_kb()
+        )
+        await cb.answer()
+        return
+    
+    tz = TIMEZONE_MAP.get(city, "Europe/Moscow")
+    await state.update_data(company_city=city, timezone=tz)
     await state.set_state(Onboarding.company_telegram)
-    await msg.answer("📱 Telegram компании\n\nВведите ссылку (например @barbershop):\nМожно пропустить, отправив '-'")
+    await cb.message.edit_text(
+        f"✅ Город: {city}\n\n"
+        "📱 Telegram компании\n\n"
+        "Введите ссылку (например @barbershop):\n"
+        "Можно пропустить, отправив '-'",
+        reply_markup=back_kb()
+    )
+    await cb.answer()
+
+@router.message(Onboarding.company_city)
+async def create_company_city_manual(msg: Message, state: FSMContext):
+    city = msg.text.strip()
+    if not city:
+        await msg.answer("❌ Введите название города")
+        return
+    tz = TIMEZONE_MAP.get(city, "Europe/Moscow")
+    await state.update_data(company_city=city, timezone=tz)
+    await state.set_state(Onboarding.company_telegram)
+    await msg.answer(
+        f"✅ Город: {city}\n\n"
+        "📱 Telegram компании\n\n"
+        "Введите ссылку (например @barbershop):\n"
+        "Можно пропустить, отправив '-'"
+    )
 
 @router.message(Onboarding.company_telegram)
 async def create_company_telegram(msg: Message, state: FSMContext):
@@ -490,11 +631,26 @@ async def create_company_phone(msg: Message, state: FSMContext, ctx: RequestCont
         owner_username=msg.from_user.username or "",
         telegram=data["company_telegram"],
         address=data["company_address"],
-        phone=val if val != "-" else ""
+        phone=val if val != "-" else "",
+        timezone=data["timezone"]
     )
-    USER_CACHE[ctx.user_id] = RequestContext(user_id=ctx.user_id, company_id=cid, role="owner", plan="free")
+    company = await db.get_company(cid)
+    USER_CACHE[ctx.user_id] = RequestContext(
+        user_id=ctx.user_id,
+        company_id=cid,
+        role="owner",
+        plan="free",
+        timezone=company["timezone"] if company else "Europe/Moscow"
+    )
     await state.clear()
-    await msg.answer(f"✅ Компания «{data['company_name']}» создана!\n\n🔑 Код приглашения: `{invite_code}`\n\n👇 Панель владельца:", reply_markup=owner_menu(ctx))
+    await msg.answer(
+        f"✅ Компания «{data['company_name']}» создана!\n\n"
+        f"📍 Город: {data['company_city']}\n"
+        f"🕐 Часовой пояс: {data['timezone']}\n\n"
+        f"🔑 Код приглашения: `{invite_code}`\n\n"
+        f"👇 Панель владельца:",
+        reply_markup=owner_menu(ctx)
+    )
 
 @router.callback_query(F.data == "join_company")
 async def join_company_start(cb: CallbackQuery, state: FSMContext):
@@ -510,10 +666,20 @@ async def join_company_done(msg: Message, state: FSMContext, ctx: RequestContext
         await msg.answer("❌ Неверный код приглашения.")
         return
     user = await db.get_user(ctx.user_id)
-    USER_CACHE[ctx.user_id] = RequestContext(user_id=ctx.user_id, company_id=user["company_id"], role=user["role"], plan=user["plan"])
     company = await db.get_company(user["company_id"])
+    USER_CACHE[ctx.user_id] = RequestContext(
+        user_id=ctx.user_id,
+        company_id=user["company_id"],
+        role=user["role"],
+        plan=user["plan"],
+        timezone=company["timezone"] if company else "Europe/Moscow"
+    )
     await state.clear()
-    await msg.answer(f"✅ Вы присоединились к компании\n{generate_header(company['name'], user['plan'])}", reply_markup=client_menu())
+    await msg.answer(
+        f"✅ Вы присоединились к компании\n"
+        f"{generate_header(company['name'], user['plan'])}",
+        reply_markup=client_menu()
+    )
 
 @router.callback_query(F.data == "show_invite_code")
 async def show_invite_code(cb: CallbackQuery, ctx: RequestContext):
@@ -551,149 +717,6 @@ async def edit_contacts_phone(msg: Message, state: FSMContext, ctx: RequestConte
     await db.update_company_contacts(ctx.company_id, data["telegram"], data["address"], val if val != "-" else "")
     await state.clear()
     await msg.answer("✅ Контакты обновлены!", reply_markup=owner_menu(ctx))
-
-@router.callback_query(F.data == "clients_analytics")
-async def clients_analytics(cb: CallbackQuery, ctx: RequestContext):
-    async with db.pool.acquire() as c:
-        rows = await c.fetch("""
-            SELECT
-                b.client_id,
-                COUNT(*) as visits,
-                COALESCE(SUM(s.price),0) as spent,
-                MAX(b.start_time) as last_visit
-            FROM bookings b
-            JOIN services s ON s.id=b.service_id
-            WHERE b.company_id=$1
-            AND b.status='active'
-            GROUP BY b.client_id
-            ORDER BY spent DESC
-            LIMIT 20
-        """, ctx.company_id)
-
-    if not rows:
-        await cb.message.edit_text(
-            "👥 Клиенты пока отсутствуют",
-            reply_markup=back_kb()
-        )
-        return
-
-    text = "👥 ТОП КЛИЕНТЫ\n\n"
-
-    for r in rows:
-        text += (
-            f"🆔 {r['client_id']}\n"
-            f"📅 Визитов: {r['visits']}\n"
-            f"💰 Потрачено: {r['spent']} ₽\n"
-            f"🕒 Последний визит: {r['last_visit'].strftime('%d.%m.%Y')}\n\n"
-        )
-
-    await cb.message.edit_text(text, reply_markup=back_kb())
-    await cb.answer()
-
-@router.callback_query(F.data == "masters_rating")
-async def masters_rating(cb: CallbackQuery, ctx: RequestContext):
-    async with db.pool.acquire() as c:
-        rows = await c.fetch("""
-            SELECT
-                m.name,
-                ROUND(COALESCE(AVG(r.rating),0)::numeric,2) as rating,
-                COUNT(r.id) as reviews
-            FROM masters m
-            LEFT JOIN reviews r ON r.master_id=m.id
-            WHERE m.company_id=$1
-            GROUP BY m.id,m.name
-            ORDER BY rating DESC
-        """, ctx.company_id)
-
-    if not rows:
-        await cb.message.edit_text(
-            "🏆 Нет оценок для мастеров",
-            reply_markup=back_kb()
-        )
-        return
-
-    text = "🏆 РЕЙТИНГ МАСТЕРОВ\n\n"
-
-    for r in rows:
-        stars = "⭐" * min(int(r['rating']), 5) if r['rating'] > 0 else "—"
-        text += (
-            f"{stars} {r['name']}\n"
-            f"Рейтинг: {r['rating']}\n"
-            f"Отзывов: {r['reviews']}\n\n"
-        )
-
-    await cb.message.edit_text(text, reply_markup=back_kb())
-    await cb.answer()
-
-# ==================== AI HANDLERS ====================
-@router.callback_query(F.data == "ai_advice")
-async def ai_advice_for_owner(cb: CallbackQuery, ctx: RequestContext):
-    # Собираем статистику для контекста
-    async with db.pool.acquire() as c:
-        stats = await db.get_booking_stats(ctx.company_id)
-        masters_count = await c.fetchval("SELECT COUNT(*) FROM masters WHERE company_id=$1", ctx.company_id)
-        services_count = await c.fetchval("SELECT COUNT(*) FROM services WHERE company_id=$1", ctx.company_id)
-        total_bookings = await c.fetchval("SELECT COUNT(*) FROM bookings WHERE company_id=$1 AND status='active'", ctx.company_id)
-    
-    prompt = f"""
-Компания: {ctx.company_id}
-Мастеров: {masters_count}
-Услуг: {services_count}
-Всего записей: {total_bookings}
-Записей сегодня: {stats['today']}
-Записей за неделю: {stats['week']}
-Популярная услуга: {stats['popular']}
-
-Дай конкретные рекомендации по улучшению бизнеса.
-"""
-    
-    await cb.message.edit_text("🤖 Думаю...", reply_markup=back_kb())
-    
-    response = await get_deepseek_response(prompt)
-    
-    await cb.message.edit_text(
-        f"🤖 *AI СОВЕТ ВЛАДЕЛЬЦУ*\n\n{response}",
-        parse_mode="Markdown",
-        reply_markup=back_kb()
-    )
-    await cb.answer()
-
-@router.callback_query(F.data == "client_ai")
-async def ai_for_client(cb: CallbackQuery, ctx: RequestContext):
-    await cb.message.edit_text(
-        "🤖 Задайте вопрос о наших услугах, ценах или записи.\n\n"
-        "Например:\n"
-        "• Сколько стоит стрижка?\n"
-        "• Какие услуги есть?\n"
-        "• Как записаться?",
-        reply_markup=back_kb()
-    )
-    await cb.answer()
-
-@router.message(Command("ask"))
-async def ask_ai(msg: Message, ctx: RequestContext):
-    """Команда /ask вопрос к AI"""
-    if not msg.text[5:].strip():
-        await msg.answer("❌ Напиши вопрос после /ask\n\nПример: /ask Сколько стоит стрижка?")
-        return
-    
-    prompt = msg.text[5:].strip()
-    await msg.answer("🤖 Думаю...")
-    
-    response = await get_deepseek_response(prompt)
-    await msg.answer(f"🤖 *Ответ AI:*\n\n{response}", parse_mode="Markdown")
-
-@router.message()
-async def ai_chat(msg: Message, ctx: RequestContext):
-    """Обычный чат с AI (если включено)"""
-    # Можно активировать для клиентов
-    if msg.chat.type == "private" and ctx.company_id:
-        # Проверяем, хочет ли пользователь общаться с AI
-        if msg.text and len(msg.text) > 5 and not msg.text.startswith('/'):
-            # Быстрый ответ для общих вопросов
-            if any(word in msg.text.lower() for word in ['стрижка', 'цена', 'услуг', 'запись', 'мастер']):
-                response = await get_deepseek_response(f"Клиент спрашивает: {msg.text}. Ответь кратко и полезно.")
-                await msg.answer(f"🤖 {response}")
 
 # ==================== ОСНОВНЫЕ ЭКРАНЫ ====================
 @router.callback_query(F.data == "main_menu")
@@ -861,6 +884,7 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
         await cb.answer("❌ Аналитика доступна на тарифах ПРО и БИЗНЕС", show_alert=True)
         return
     
+    tz = pytz_timezone(ctx.timezone)
     async with db.pool.acquire() as c:
         stats = await db.get_booking_stats(ctx.company_id)
         
@@ -875,13 +899,13 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
         """, ctx.company_id)
         
         peak_hour = await c.fetchrow("""
-            SELECT EXTRACT(HOUR FROM start_time) as hour, COUNT(*) as cnt
+            SELECT EXTRACT(HOUR FROM start_time AT TIME ZONE $2) as hour, COUNT(*) as cnt
             FROM bookings
             WHERE company_id=$1 AND status='active'
             GROUP BY hour
             ORDER BY cnt DESC
             LIMIT 1
-        """, ctx.company_id)
+        """, ctx.company_id, ctx.timezone)
         
         top_revenue = await c.fetchrow("""
             SELECT m.name, SUM(s.price) as total
@@ -895,12 +919,12 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
         """, ctx.company_id)
         
         week_stats = await c.fetch("""
-            SELECT DATE(start_time) as day, COUNT(*) as cnt
+            SELECT DATE(start_time AT TIME ZONE $2) as day, COUNT(*) as cnt
             FROM bookings
             WHERE company_id=$1 AND status='active' AND start_time > NOW() - interval '7 days'
             GROUP BY day
             ORDER BY day
-        """, ctx.company_id)
+        """, ctx.company_id, ctx.timezone)
         
         rows = await db.get_revenue_by_company(ctx.company_id)
     
@@ -909,7 +933,9 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
         bar = "█" * min(day["cnt"], 20)
         graph += f"{day['day'].strftime('%d.%m')}: {bar} {day['cnt']}\n"
     
+    now = datetime.now(tz)
     text = f"📊 *УМНАЯ АНАЛИТИКА*\n\n"
+    text += f"🕐 Время: {now.strftime('%H:%M')} ({ctx.timezone})\n"
     text += f"📅 Записей сегодня: {stats['today']}\n"
     text += f"📆 Записей за неделю: {stats['week']}\n"
     text += f"🔥 Популярная услуга: {stats['popular']} ({stats['popular_count']} зап.)\n"
@@ -931,10 +957,6 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
             text += f"• {PLAN_NAMES.get(r['plan'], r['plan'])}: {r['revenue']}₽\n"
     else:
         text += "Нет данных\n"
-    
-    stats_text = f"Записей сегодня {stats['today']}, за неделю {stats['week']}, популярная услуга {stats['popular']}"
-    advice = await get_gpt_advice(stats_text)
-    text += f"\n🧠 *Совет AI:* {advice}\n"
     
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb())
     await cb.answer()
@@ -981,14 +1003,15 @@ async def book_master(cb: CallbackQuery, state: FSMContext, ctx: RequestContext)
     await cb.answer()
 
 @router.callback_query(BookFSM.service, F.data.startswith("s_"))
-async def book_date(cb: CallbackQuery, state: FSMContext):
+async def book_date(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     service_id = int(cb.data.split("_")[1])
     await state.update_data(service_id=service_id)
     await state.set_state(BookFSM.date)
     kb = InlineKeyboardBuilder()
-    now_msk = datetime.now(MOSCOW_TZ)
+    tz = pytz_timezone(ctx.timezone)
+    now = datetime.now(tz)
     for i in range(14):
-        day = now_msk + timedelta(days=i)
+        day = now + timedelta(days=i)
         kb.button(text=day.strftime("%d.%m (%a)"), callback_data=f"date_{day.strftime('%Y-%m-%d')}")
     kb.button(text="◀️ Назад", callback_data="book")
     kb.adjust(2)
@@ -996,15 +1019,16 @@ async def book_date(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 @router.callback_query(BookFSM.date, F.data.startswith("date_"))
-async def book_time(cb: CallbackQuery, state: FSMContext):
+async def book_time(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     date_str = cb.data[5:]
     await state.update_data(date=date_str)
     await state.set_state(BookFSM.time)
     kb = InlineKeyboardBuilder()
-    now_msk = datetime.now(MOSCOW_TZ)
+    tz = pytz_timezone(ctx.timezone)
+    now = datetime.now(tz)
     selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     for h in range(10, 19):
-        if selected_date > now_msk.date() or (selected_date == now_msk.date() and h > now_msk.hour):
+        if selected_date > now.date() or (selected_date == now.date() and h > now.hour):
             kb.button(text=f"⏰ {h}:00", callback_data=f"t_{h}")
     kb.button(text="◀️ Назад", callback_data="book")
     kb.adjust(3)
@@ -1021,12 +1045,13 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
             await state.clear()
             return
         
+        tz = pytz_timezone(ctx.timezone)
         date_obj = datetime.strptime(data["date"], "%Y-%m-%d").date()
         start = datetime.combine(date_obj, datetime.min.time().replace(hour=hour))
         end = start + timedelta(hours=1)
         
-        now_msk = datetime.now(MOSCOW_TZ)
-        if start.date() < now_msk.date() or (start.date() == now_msk.date() and start.hour <= now_msk.hour):
+        now = datetime.now(tz)
+        if start.date() < now.date() or (start.date() == now.date() and start.hour <= now.hour):
             await cb.answer("❌ Нельзя записаться в прошлое!", show_alert=True)
             return
         
@@ -1066,12 +1091,13 @@ async def my_bookings(cb: CallbackQuery, ctx: RequestContext):
     if not rows:
         await cb.message.edit_text("📋 Нет записей.", reply_markup=back_kb())
     else:
+        tz = pytz_timezone(ctx.timezone)
         kb = InlineKeyboardBuilder()
         text = "📋 ВАШИ ЗАПИСИ:\n\n"
         for r in rows:
-            start_msk = r['start_time'].astimezone(MOSCOW_TZ) if r['start_time'].tzinfo else r['start_time']
+            start_tz = r['start_time'].astimezone(tz) if r['start_time'].tzinfo else r['start_time'].replace(tzinfo=tz)
             status = "❌ Отменена" if r["status"] == "cancelled" else "✅ Активна"
-            text += f"{status} #{r['id']} — {r['service_name']}\n👨‍🔧 {r['master_name']}\n📅 {start_msk.strftime('%d.%m.%Y %H:%M')}\n\n"
+            text += f"{status} #{r['id']} — {r['service_name']}\n👨‍🔧 {r['master_name']}\n📅 {start_tz.strftime('%d.%m.%Y %H:%M')}\n\n"
             if r["status"] == "active":
                 kb.button(text=f"🔄 Повторить #{r['id']}", callback_data=f"repeat_{r['id']}")
                 kb.button(text=f"❌ Отменить #{r['id']}", callback_data=f"cancel_{r['id']}")
@@ -1089,10 +1115,11 @@ async def all_bookings(cb: CallbackQuery, ctx: RequestContext):
     if not rows:
         await cb.message.edit_text("📋 Нет активных записей.", reply_markup=back_kb())
     else:
+        tz = pytz_timezone(ctx.timezone)
         text = "📋 ВСЕ ЗАПИСИ:\n\n"
         for r in rows:
-            start_msk = r['start_time'].astimezone(MOSCOW_TZ) if r['start_time'].tzinfo else r['start_time']
-            text += f"✅ #{r['id']} — {r['service_name']}\n👨‍🔧 {r['master_name']}\n📅 {start_msk.strftime('%d.%m.%Y %H:%M')}\n\n"
+            start_tz = r['start_time'].astimezone(tz) if r['start_time'].tzinfo else r['start_time'].replace(tzinfo=tz)
+            text += f"✅ #{r['id']} — {r['service_name']}\n👨‍🔧 {r['master_name']}\n📅 {start_tz.strftime('%d.%m.%Y %H:%M')}\n\n"
         await cb.message.edit_text(text, reply_markup=back_kb())
     await cb.answer()
 
@@ -1105,9 +1132,10 @@ async def repeat_booking(cb: CallbackQuery, state: FSMContext, ctx: RequestConte
             await state.update_data(master_id=booking["master_id"], service_id=booking["service_id"])
             await state.set_state(BookFSM.date)
             kb = InlineKeyboardBuilder()
-            now_msk = datetime.now(MOSCOW_TZ)
+            tz = pytz_timezone(ctx.timezone)
+            now = datetime.now(tz)
             for i in range(14):
-                day = now_msk + timedelta(days=i)
+                day = now + timedelta(days=i)
                 kb.button(text=day.strftime("%d.%m (%a)"), callback_data=f"date_{day.strftime('%Y-%m-%d')}")
             kb.button(text="◀️ Назад", callback_data="my_bookings")
             kb.adjust(2)
@@ -1133,11 +1161,12 @@ async def export_csv_handler(cb: CallbackQuery, ctx: RequestContext):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["ID", "Дата", "Время", "Услуга", "Цена", "Мастер", "Клиент ID", "Статус"])
+    tz = pytz_timezone(ctx.timezone)
     for r in rows:
-        start_msk = r["start_time"].astimezone(MOSCOW_TZ) if r["start_time"].tzinfo else r["start_time"]
-        writer.writerow([r["id"], start_msk.strftime("%Y-%m-%d"), start_msk.strftime("%H:%M"), r["service_name"], r["price"], r["master_name"], r["client_id"], r["status"]])
+        start_tz = r["start_time"].astimezone(tz) if r["start_time"].tzinfo else r["start_time"].replace(tzinfo=tz)
+        writer.writerow([r["id"], start_tz.strftime("%Y-%m-%d"), start_tz.strftime("%H:%M"), r["service_name"], r["price"], r["master_name"], r["client_id"], r["status"]])
     output.seek(0)
-    await cb.message.answer_document(BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename=f"bookings_{datetime.now(MOSCOW_TZ).strftime('%Y%m%d')}.csv"), caption="📎 Экспорт записей за 30 дней")
+    await cb.message.answer_document(BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename=f"bookings_{datetime.now(tz).strftime('%Y%m%d_%H%M')}.csv"), caption="📎 Экспорт записей за 30 дней")
     await cb.answer()
 
 @router.callback_query(F.data == "contact")
@@ -1152,9 +1181,9 @@ async def contact(cb: CallbackQuery, ctx: RequestContext):
 @router.message(Command("help"))
 async def help_command(msg: Message, ctx: RequestContext):
     if ctx.role == "owner":
-        help_text = "📚 СПРАВКА ВЛАДЕЛЬЦА\n\n/start — Главное меню\n/help — Эта справка\n/ask — Вопрос AI\n\n💈 Управление услугами в разделе Услуги\n👨‍🔧 Мастера добавляются там же\n💰 Тарифы меняются в разделе Тариф\n📊 Аналитика показывает статистику"
+        help_text = "📚 СПРАВКА ВЛАДЕЛЬЦА\n\n/start — Главное меню\n/help — Эта справка\n\n💈 Управление услугами в разделе Услуги\n👨‍🔧 Мастера добавляются там же\n💰 Тарифы меняются в разделе Тариф\n📊 Аналитика показывает статистику"
     elif ctx.role == "client":
-        help_text = "📚 СПРАВКА КЛИЕНТА\n\n/start — Главное меню\n/help — Эта справка\n/ask — Спросить AI\n\n📅 Запись в разделе Записи\n📋 Мои записи — просмотр и отмена\n🔄 Повтор записи — в Моих записях"
+        help_text = "📚 СПРАВКА КЛИЕНТА\n\n/start — Главное меню\n/help — Эта справка\n\n📅 Запись в разделе Записи\n📋 Мои записи — просмотр и отмена\n🔄 Повтор записи — в Моих записях"
     else:
         help_text = "📚 СПРАВКА МАСТЕРА\n\n/start — Главное меню\n/help — Эта справка\n📅 /today — расписание на сегодня"
     await msg.answer(help_text)
@@ -1163,23 +1192,37 @@ async def help_command(msg: Message, ctx: RequestContext):
 async def reminder_worker():
     while True:
         try:
-            now_msk = datetime.now(MOSCOW_TZ)
-            now_naive = now_msk.replace(tzinfo=None)
-            
             async with db.pool.acquire() as c:
-                bookings = await c.fetch("""
-                    SELECT b.*, m.name as master_name, s.name as service_name, comp.address
-                    FROM bookings b
-                    JOIN masters m ON b.master_id = m.id
-                    JOIN services s ON b.service_id = s.id
-                    JOIN companies comp ON b.company_id = comp.id
-                    WHERE b.start_time BETWEEN $1 AND $2
-                    AND b.status='active' AND b.reminder_24h_sent = FALSE
-                """, now_naive, now_naive + timedelta(hours=24))
-                for booking in bookings:
-                    start_msk = booking['start_time'].astimezone(MOSCOW_TZ) if booking['start_time'].tzinfo else booking['start_time']
-                    await bot.send_message(booking["client_id"], f"⏰ НАПОМИНАНИЕ!\n\nЗавтра в {start_msk.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}")
-                    await c.execute("UPDATE bookings SET reminder_24h_sent = TRUE WHERE id = $1", booking["id"])
+                companies = await c.fetch("SELECT id, timezone FROM companies")
+                for company in companies:
+                    now = datetime.now()
+                    bookings = await c.fetch("""
+                        SELECT b.*, m.name as master_name, s.name as service_name, comp.address, comp.timezone
+                        FROM bookings b
+                        JOIN masters m ON b.master_id = m.id
+                        JOIN services s ON b.service_id = s.id
+                        JOIN companies comp ON b.company_id = comp.id
+                        WHERE b.start_time BETWEEN $1 AND $2
+                        AND b.status='active' AND b.reminder_24h_sent = FALSE
+                        AND b.company_id = $3
+                    """, now, now + timedelta(hours=24), company["id"])
+                    for booking in bookings:
+                        booking_tz = pytz_timezone(booking["timezone"] if booking["timezone"] else "Europe/Moscow")
+                        start_tz = booking['start_time'].astimezone(booking_tz) if booking['start_time'].tzinfo else booking['start_time'].replace(tzinfo=booking_tz)
+                        
+                        today = datetime.now(booking_tz).date()
+                        if start_tz.date() == today:
+                            day_word = "Сегодня"
+                        elif start_tz.date() == today + timedelta(days=1):
+                            day_word = "Завтра"
+                        else:
+                            day_word = start_tz.strftime("%d.%m")
+                        
+                        await bot.send_message(
+                            booking["client_id"],
+                            f"⏰ НАПОМИНАНИЕ!\n\n{day_word} в {start_tz.strftime('%H:%M')} у вас запись\n💈 {booking['service_name']} → {booking['master_name']}\n📍 {booking['address'] or 'адрес не указан'}"
+                        )
+                        await c.execute("UPDATE bookings SET reminder_24h_sent = TRUE WHERE id = $1", booking["id"])
             await asyncio.sleep(3600)
         except Exception as e:
             logger.error(f"Reminder worker error: {e}")
@@ -1188,62 +1231,30 @@ async def reminder_worker():
 async def review_worker():
     while True:
         try:
-            now_msk = datetime.now(MOSCOW_TZ)
-            now_naive = now_msk.replace(tzinfo=None)
-            one_hour_ago = (now_msk - timedelta(hours=1)).replace(tzinfo=None)
-            
             async with db.pool.acquire() as c:
-                bookings = await c.fetch("""
-                    SELECT b.*, m.name as master_name, s.name as service_name
-                    FROM bookings b
-                    JOIN masters m ON b.master_id = m.id
-                    JOIN services s ON b.service_id = s.id
-                    WHERE b.start_time < $1 AND b.end_time < $2
-                    AND b.status='active' AND b.review_sent = FALSE
-                """, one_hour_ago, now_naive)
-                for booking in bookings:
-                    kb = InlineKeyboardBuilder()
-                    for i in range(1, 6):
-                        kb.button(text=f"⭐ {i}", callback_data=f"rating_{booking['id']}_{i}")
-                    kb.adjust(5)
-                    await bot.send_message(booking["client_id"], f"⭐ Как прошёл визит?\n\nОцените запись #{booking['id']}\n💇 {booking['service_name']} → {booking['master_name']}", reply_markup=kb.as_markup())
-                    await c.execute("UPDATE bookings SET review_sent = TRUE WHERE id = $1", booking["id"])
+                companies = await c.fetch("SELECT id, timezone FROM companies")
+                for company in companies:
+                    now = datetime.now()
+                    bookings = await c.fetch("""
+                        SELECT b.*, m.name as master_name, s.name as service_name, comp.timezone
+                        FROM bookings b
+                        JOIN masters m ON b.master_id = m.id
+                        JOIN services s ON b.service_id = s.id
+                        JOIN companies comp ON b.company_id = comp.id
+                        WHERE b.start_time < $1 AND b.end_time < $2
+                        AND b.status='active' AND b.review_sent = FALSE
+                        AND b.company_id = $3
+                    """, now - timedelta(hours=1), now, company["id"])
+                    for booking in bookings:
+                        kb = InlineKeyboardBuilder()
+                        for i in range(1, 6):
+                            kb.button(text=f"⭐ {i}", callback_data=f"rating_{booking['id']}_{i}")
+                        kb.adjust(5)
+                        await bot.send_message(booking["client_id"], f"⭐ Как прошёл визит?\n\nОцените запись #{booking['id']}\n💇 {booking['service_name']} → {booking['master_name']}", reply_markup=kb.as_markup())
+                        await c.execute("UPDATE bookings SET review_sent = TRUE WHERE id = $1", booking["id"])
             await asyncio.sleep(3600)
         except Exception as e:
             logger.error(f"Review worker error: {e}")
-            await asyncio.sleep(3600)
-
-async def return_clients_worker():
-    while True:
-        try:
-            async with db.pool.acquire() as c:
-                rows = await c.fetch("""
-                    SELECT
-                        client_id,
-                        company_id,
-                        MAX(start_time) as last_visit
-                    FROM bookings
-                    WHERE status='active'
-                    GROUP BY client_id, company_id
-                    HAVING MAX(start_time)
-                        < NOW() - interval '30 days'
-                """)
-
-            for row in rows:
-                try:
-                    await bot.send_message(
-                        row["client_id"],
-                        "👋 Давно не виделись!\n\n"
-                        "Прошло больше месяца после последнего визита.\n"
-                        "Пора обновить образ ✂️"
-                    )
-                except:
-                    pass
-
-            await asyncio.sleep(86400)
-
-        except Exception as e:
-            logger.error(f"return worker error: {e}")
             await asyncio.sleep(3600)
 
 dp.include_router(router)
@@ -1255,13 +1266,15 @@ async def run_api():
 async def main():
     global BOT_USERNAME
     await db.init()
+    await bot.delete_webhook(drop_pending_updates=True)
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
-    dp.message.middleware(ContextMiddleware(db.pool))
-    dp.callback_query.middleware(ContextMiddleware(db.pool))
+    
+    dp.message.middleware(ContextMiddleware(db))
+    dp.callback_query.middleware(ContextMiddleware(db))
+    
     asyncio.create_task(reminder_worker())
     asyncio.create_task(review_worker())
-    asyncio.create_task(return_clients_worker())
     logger.info("👑 EMPIRE SAAS V16 ULTIMATE ЗАПУЩЕН!")
     print(f"✅ Bot username: @{BOT_USERNAME}")
     print("💰 Тарифы: СТАРТ 490₽ | ПРО 990₽ | БИЗНЕС 1490₽")
@@ -1269,8 +1282,10 @@ async def main():
     print("🔄 Повтор записи работает")
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
-    print("🤖 DeepSeek AI интегрирован! - no nixya ne rabotaet kanatka avstraliskaya")
-    await asyncio.gather(run_api(), dp.start_polling(bot))
+    await asyncio.gather(
+        run_api(), 
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
