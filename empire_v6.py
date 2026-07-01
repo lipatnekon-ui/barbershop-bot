@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-👑 EMPIRE SAAS V16 — ULTIMATE EDITION (AI-СОВЕТЫ ВЫКЛЮЧЕНЫ)
+BarberShopAdministration — gemini ai
 """
-import asyncio, asyncpg, os, time, logging, secrets, csv, io, aiohttp, pytz, qrcode
+import asyncio, asyncpg, os, time, logging, secrets, csv, io, base64, aiohttp, pytz, qrcode
 from pytz import timezone as pytz_timezone
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
@@ -21,11 +21,16 @@ import uvicorn, re
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 DB_URL = os.getenv("DATABASE_URL")
-YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119552067165")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+AI_USAGE_LIMIT_PER_DAY = int(os.getenv("AI_USAGE_LIMIT_PER_DAY", "10"))
+AI_USAGE = defaultdict(list)  # uid -> [timestamps]
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
     raise ValueError("❌ Неверный BOT_TOKEN")
@@ -33,10 +38,13 @@ if not BOT_TOKEN or ":" not in BOT_TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+if not GEMINI_API_KEY:
+    logger.warning("⚠️ GEMINI_API_KEY не задан — AI-консультант будет отвечать заглушкой")
+
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
-app = FastAPI(title="👑 EMPIRE SAAS V16")
+app = FastAPI(title="👑 EMPIRE SAAS V17")
 
 # Московское время (по умолчанию)
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -110,6 +118,7 @@ def owner_menu(ctx):
 def client_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 Записаться", callback_data="bookings_screen")
+    kb.button(text="🤖 AI-консультант", callback_data="ai_menu")
     kb.button(text="📞 Контакты", callback_data="contact")
     kb.adjust(1)
     return kb.as_markup()
@@ -282,12 +291,81 @@ class DB:
 
 db = DB()
 
+# ==================== AI-СЕРВИС (Gemini) ====================
+class AIService:
+    """
+    Тонкая обёртка над Gemini REST API (generateContent).
+    Работает и в текстовом, и в мультимодальном (фото) режиме.
+    Никогда не бросает исключение наружу — при любой ошибке возвращает
+    дружелюбное сообщение, чтобы бот не падал из-за внешнего API.
+    """
+
+    def __init__(self, api_key: str, url: str):
+        self.api_key = api_key
+        self.url = url
+
+    async def generate(self, prompt: str, image_bytes: bytes = None, mime_type: str = "image/jpeg") -> str:
+        if not self.api_key:
+            return "🤖 AI-консультант временно не настроен администратором. Загляните позже!"
+
+        parts = [{"text": prompt}]
+        if image_bytes:
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                }
+            })
+
+        payload = {"contents": [{"parts": parts}]}
+        headers = {"Content-Type": "application/json"}
+        params = {"key": self.api_key}
+
+        for attempt in range(2):  # одна попытка + один retry при 429/5xx
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.url, params=params, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as resp:
+                        if resp.status == 429:
+                            if attempt == 0:
+                                await asyncio.sleep(2)
+                                continue
+                            return "🤖 Сейчас слишком много запросов к AI. Попробуйте через минуту 🙏"
+                        if resp.status >= 400:
+                            body = await resp.text()
+                            logger.error(f"Gemini API error {resp.status}: {body[:300]}")
+                            return "🤖 AI временно не отвечает, попробуйте чуть позже."
+                        data = await resp.json()
+                        candidates = data.get("candidates") or []
+                        if not candidates:
+                            return "🤖 Не удалось получить ответ от AI, попробуйте переформулировать."
+                        parts_out = candidates[0].get("content", {}).get("parts", [])
+                        text = "".join(p.get("text", "") for p in parts_out).strip()
+                        return text or "🤖 AI ответил пусто, попробуйте ещё раз."
+            except asyncio.TimeoutError:
+                return "🤖 AI долго отвечает, попробуйте ещё раз чуть позже."
+            except Exception as e:
+                logger.error(f"AIService error: {e}")
+                return "🤖 Произошла ошибка при обращении к AI. Попробуйте позже."
+
+ai_service = AIService(GEMINI_API_KEY, GEMINI_URL)
+
+def check_ai_limit(uid: int) -> bool:
+    now = time.time()
+    AI_USAGE[uid] = [t for t in AI_USAGE[uid] if now - t < 86400]
+    return len(AI_USAGE[uid]) < AI_USAGE_LIMIT_PER_DAY
+
+def register_ai_usage(uid: int):
+    AI_USAGE[uid].append(time.time())
+
 class AccessService:
     FEATURES = {
         "free": ["book", "manage_masters"],
         "start": ["book", "manage_masters", "today"],
-        "pro": ["book", "manage_masters", "today", "analytics"],
-        "business": ["book", "manage_masters", "today", "analytics", "export"]
+        "pro": ["book", "manage_masters", "today", "analytics", "ai_consultant"],
+        "business": ["book", "manage_masters", "today", "analytics", "export", "ai_consultant"]
     }
     MASTER_LIMITS = {"free": 1, "start": 3, "pro": 10, "business": 999}
     def can(self, ctx, feature): return feature in self.FEATURES.get(ctx.plan, [])
@@ -328,6 +406,10 @@ class EditContactsFSM(StatesGroup):
     telegram = State()
     address = State()
     phone = State()
+
+class AIConsultFSM(StatesGroup):
+    waiting_photo = State()
+    waiting_question = State()
 
 def generate_header(company_name, current_plan):
     plan_name = PLAN_NAMES.get(current_plan, "FREE")
@@ -376,6 +458,140 @@ async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
     except Exception as e:
         logger.error(f"QR generation error: {e}")
         await cb.answer("❌ Ошибка генерации QR-кода", show_alert=True)
+
+# ==================== AI-КОНСУЛЬТАНТ (Gemini) ====================
+@router.callback_query(F.data == "ai_menu")
+async def ai_menu(cb: CallbackQuery, ctx: RequestContext):
+    if not access.can(ctx, "ai_consultant"):
+        await cb.answer(
+            "🤖 AI-консультант — фича тарифов ПРО и БИЗНЕС.\n"
+            "Подбор стрижки по фото + ответы на вопросы клиентов.\n"
+            "Загляните в раздел «Тарифы», чтобы включить.",
+            show_alert=True
+        )
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📸 Подобрать стрижку по фото", callback_data="ai_photo_start")
+    kb.button(text="❓ Задать вопрос", callback_data="ai_ask_start")
+    kb.button(text="⬅️ Назад", callback_data="main_menu")
+    kb.adjust(1)
+    await cb.message.edit_text(
+        "🤖 AI-КОНСУЛЬТАНТ\n\n"
+        "📸 Пришлите фото — подберу 3 стрижки под форму лица и тренды 2026 года\n"
+        "❓ Или просто спросите про услуги, уход, цены",
+        reply_markup=kb.as_markup()
+    )
+    await cb.answer()
+
+@router.callback_query(F.data == "ai_photo_start")
+async def ai_photo_start(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
+    if not access.can(ctx, "ai_consultant"):
+        await cb.answer("❌ Доступно на тарифах ПРО и БИЗНЕС", show_alert=True)
+        return
+    if not check_ai_limit(ctx.user_id):
+        await cb.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!", show_alert=True)
+        return
+    await state.set_state(AIConsultFSM.waiting_photo)
+    await cb.message.edit_text(
+        "📸 Отправьте фото лица (портрет, хорошее освещение) —\n"
+        "AI подберёт 3 варианта стрижки, актуальных в 2026 году.\n\n"
+        "⚠️ Фото используется только для анализа и не сохраняется на сервере.",
+        reply_markup=back_kb()
+    )
+    await cb.answer()
+
+@router.message(AIConsultFSM.waiting_photo, F.photo)
+async def ai_photo_process(msg: Message, state: FSMContext, ctx: RequestContext):
+    if not check_ai_limit(ctx.user_id):
+        await msg.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!")
+        await state.clear()
+        return
+
+    thinking_msg = await msg.answer("🤖 Анализирую фото, подождите ~10 секунд...")
+
+    try:
+        photo = msg.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        buf = BytesIO()
+        await bot.download_file(file.file_path, buf)
+        image_bytes = buf.getvalue()
+
+        prompt = (
+            "Ты — топовый барбер-стилист. Проанализируй форму лица человека на фото "
+            "и предложи ровно 3 конкретные мужские стрижки, актуальные в 2026 году. "
+            "Для каждой: название, 1-2 предложения описания, почему она подходит именно "
+            "этой форме лица. Пиши на русском языке, простым текстом без markdown-разметки, "
+            "дружелюбно и по-барберски. Если на фото не видно лица — вежливо попроси "
+            "прислать другое фото."
+        )
+        result = await ai_service.generate(prompt, image_bytes=image_bytes, mime_type="image/jpeg")
+        register_ai_usage(ctx.user_id)
+
+        await thinking_msg.delete()
+        await msg.answer(
+            f"🤖 AI-РЕКОМЕНДАЦИИ ПО СТРИЖКЕ:\n\n{result}\n\n"
+            f"💈 Запишитесь к мастеру, чтобы обсудить понравившийся вариант!",
+            reply_markup=client_menu()
+        )
+    except Exception as e:
+        logger.error(f"AI photo processing error: {e}")
+        await thinking_msg.delete()
+        await msg.answer("❌ Не удалось обработать фото, попробуйте другое изображение.", reply_markup=client_menu())
+    finally:
+        await state.clear()
+
+@router.message(AIConsultFSM.waiting_photo)
+async def ai_photo_wrong_type(msg: Message):
+    await msg.answer("❌ Пришлите, пожалуйста, именно фото (не файл и не текст).")
+
+@router.callback_query(F.data == "ai_ask_start")
+async def ai_ask_start(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
+    if not access.can(ctx, "ai_consultant"):
+        await cb.answer("❌ Доступно на тарифах ПРО и БИЗНЕС", show_alert=True)
+        return
+    if not check_ai_limit(ctx.user_id):
+        await cb.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!", show_alert=True)
+        return
+    await state.set_state(AIConsultFSM.waiting_question)
+    await cb.message.edit_text(
+        "❓ Задайте любой вопрос про услуги, стрижки, уход за бородой и т.п. —\n"
+        "отвечу как консультант вашего барбершопа.",
+        reply_markup=back_kb()
+    )
+    await cb.answer()
+
+@router.message(AIConsultFSM.waiting_question, F.text)
+async def ai_ask_process(msg: Message, state: FSMContext, ctx: RequestContext):
+    if not check_ai_limit(ctx.user_id):
+        await msg.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!")
+        await state.clear()
+        return
+
+    thinking_msg = await msg.answer("🤖 Думаю над ответом...")
+
+    try:
+        company = await db.get_company(ctx.company_id)
+        services = await db.get_services(ctx.company_id)
+        services_text = "\n".join(f"- {s['name']}: {s['price']}₽ ({s['duration']} мин)" for s in services) or "услуги пока не добавлены"
+
+        prompt = (
+            f"Ты — вежливый AI-консультант барбершопа «{company['name'] if company else 'барбершоп'}». "
+            f"Вот список услуг и цен:\n{services_text}\n\n"
+            f"Вопрос клиента: {msg.text}\n\n"
+            f"Ответь кратко (3-5 предложений), по-русски, простым текстом без markdown. "
+            f"Если вопрос не про барбершоп/стрижки/уход — вежливо перенаправь к теме услуг."
+        )
+        result = await ai_service.generate(prompt)
+        register_ai_usage(ctx.user_id)
+
+        await thinking_msg.delete()
+        await msg.answer(f"🤖 {result}", reply_markup=client_menu())
+    except Exception as e:
+        logger.error(f"AI ask processing error: {e}")
+        await thinking_msg.delete()
+        await msg.answer("❌ Не получилось получить ответ, попробуйте ещё раз.", reply_markup=client_menu())
+    finally:
+        await state.clear()
 
 # ==================== АКТИВАЦИЯ ПОДПИСОК (АДМИН-КОМАНДА) ====================
 @router.message(Command("activate"))
@@ -533,7 +749,7 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
     kb.button(text="🔑 Войти по коду", callback_data="join_company")
     kb.adjust(1)
     await msg.answer(
-        "👑 EMPIRE SAAS V16\n\nУ вас ещё нет компании.\n\n• Создать — стать владельцем бизнеса\n• Войти по коду — клиентом к существующей компании\n\n📚 /help — справка\n\n💰 Тарифы: СТАРТ 490₽/мес | ПРО 990₽/мес | БИЗНЕС 1490₽/мес",
+        "👑 EMPIRE SAAS V17\n\nУ вас ещё нет компании.\n\n• Создать — стать владельцем бизнеса\n• Войти по коду — клиентом к существующей компании\n\n📚 /help — справка\n\n💰 Тарифы: СТАРТ 490₽/мес | ПРО 990₽/мес (+AI) | БИЗНЕС 1490₽/мес (+AI)",
         reply_markup=kb.as_markup()
     )
 
@@ -866,7 +1082,12 @@ async def billing_screen(cb: CallbackQuery, ctx: RequestContext):
     kb.button(text="👑 БИЗНЕС — 1490₽/мес", callback_data="pay_business")
     kb.button(text="⬅️ Назад", callback_data="main_menu")
     kb.adjust(1)
-    text = "💳 ВЫБЕРИ ТАРИФ:\n\n⭐ СТАРТ (490₽) — 65 записей/мес + мастера\n🔥 ПРО (990₽) — 1000 записей + аналитика\n👑 БИЗНЕС (1490₽) — безлимит + экспорт"
+    text = (
+        "💳 ВЫБЕРИ ТАРИФ:\n\n"
+        "⭐ СТАРТ (490₽) — 65 записей/мес + мастера\n"
+        "🔥 ПРО (990₽) — 1000 записей + аналитика + 🤖 AI-консультант\n"
+        "👑 БИЗНЕС (1490₽) — безлимит + экспорт + 🤖 AI-консультант"
+    )
     await cb.message.edit_text(text, reply_markup=kb.as_markup())
     await cb.answer()
 
@@ -1181,9 +1402,19 @@ async def contact(cb: CallbackQuery, ctx: RequestContext):
 @router.message(Command("help"))
 async def help_command(msg: Message, ctx: RequestContext):
     if ctx.role == "owner":
-        help_text = "📚 СПРАВКА ВЛАДЕЛЬЦА\n\n/start — Главное меню\n/help — Эта справка\n\n💈 Управление услугами в разделе Услуги\n👨‍🔧 Мастера добавляются там же\n💰 Тарифы меняются в разделе Тариф\n📊 Аналитика показывает статистику"
+        help_text = (
+            "📚 СПРАВКА ВЛАДЕЛЬЦА\n\n/start — Главное меню\n/help — Эта справка\n\n"
+            "💈 Управление услугами в разделе Услуги\n👨‍🔧 Мастера добавляются там же\n"
+            "💰 Тарифы меняются в разделе Тариф\n📊 Аналитика показывает статистику\n"
+            "🤖 AI-консультант для клиентов доступен на тарифах ПРО/БИЗНЕС"
+        )
     elif ctx.role == "client":
-        help_text = "📚 СПРАВКА КЛИЕНТА\n\n/start — Главное меню\n/help — Эта справка\n\n📅 Запись в разделе Записи\n📋 Мои записи — просмотр и отмена\n🔄 Повтор записи — в Моих записях"
+        help_text = (
+            "📚 СПРАВКА КЛИЕНТА\n\n/start — Главное меню\n/help — Эта справка\n\n"
+            "📅 Запись в разделе Записи\n📋 Мои записи — просмотр и отмена\n"
+            "🔄 Повтор записи — в Моих записях\n"
+            "🤖 AI-консультант — подбор стрижки по фото и ответы на вопросы"
+        )
     else:
         help_text = "📚 СПРАВКА МАСТЕРА\n\n/start — Главное меню\n/help — Эта справка\n📅 /today — расписание на сегодня"
     await msg.answer(help_text)
@@ -1275,10 +1506,11 @@ async def main():
     
     asyncio.create_task(reminder_worker())
     asyncio.create_task(review_worker())
-    logger.info("👑 EMPIRE SAAS V16 ULTIMATE ЗАПУЩЕН!")
+    logger.info("👑 EMPIRE SAAS V17 ULTIMATE ЗАПУЩЕН!")
     print(f"✅ Bot username: @{BOT_USERNAME}")
-    print("💰 Тарифы: СТАРТ 490₽ | ПРО 990₽ | БИЗНЕС 1490₽")
-    print("📊 Умная аналитика + графики + GPT-советы включены")
+    print("💰 Тарифы: СТАРТ 490₽ | ПРО 990₽ (+AI) | БИЗНЕС 1490₽ (+AI)")
+    print(f"🤖 AI-консультант (Gemini): {'включён' if GEMINI_API_KEY else 'НЕ настроен (нет GEMINI_API_KEY)'}")
+    print("📊 Умная аналитика + графики")
     print("🔄 Повтор записи работает")
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
