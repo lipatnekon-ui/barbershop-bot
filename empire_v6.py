@@ -95,6 +95,26 @@ class RequestContext:
     plan: str = "free"
     timezone: str = "Europe/Moscow"
 
+async def safe_edit_or_send(message: Message, text: str, reply_markup=None):
+    """Безопасно редактирует сообщение или отправляет новое при ошибке"""
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        # Если редактирование невозможно (нет текста или сообщение удалено)
+        try:
+            await message.delete()
+        except:
+            pass
+        # Отправляем новое сообщение
+        await message.answer(text, reply_markup=reply_markup)
+
+async def safe_delete_message(message: Message):
+    """Безопасно удаляет сообщение"""
+    try:
+        await message.delete()
+    except:
+        pass
+
 def back_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="main_menu")
@@ -446,13 +466,13 @@ async def generate_qr(cb: CallbackQuery, ctx: RequestContext):
         img.save(buf, format="PNG")
         buf.seek(0)
         
-        await cb.message.answer_photo(
-            BufferedInputFile(buf.getvalue(), filename="qr.png"),
-            caption=f"📱 QR-код для вашего барбершопа\n\n"
-                    f"Клиенты сканируют и попадают в вашего бота.\n"
-                    f"Ссылка: {qr_data}\n\n"
-                    f"🔑 Код: `{invite_code}`",
-            reply_markup=back_kb()
+        await safe_edit_or_send(
+            cb.message,
+            f"📱 QR-код для вашего барбершопа\n\n"
+            f"Клиенты сканируют и попадают в вашего бота.\n"
+            f"Ссылка: {qr_data}\n\n"
+            f"🔑 Код: `{invite_code}`",
+            back_kb()
         )
         await cb.answer()
     except Exception as e:
@@ -475,11 +495,12 @@ async def ai_menu(cb: CallbackQuery, ctx: RequestContext):
     kb.button(text="❓ Задать вопрос", callback_data="ai_ask_start")
     kb.button(text="⬅️ Назад", callback_data="main_menu")
     kb.adjust(1)
-    await cb.message.edit_text(
+    await safe_edit_or_send(
+        cb.message,
         "🤖 AI-КОНСУЛЬТАНТ\n\n"
         "📸 Пришлите фото — подберу 3 стрижки под форму лица и тренды 2026 года\n"
         "❓ Или просто спросите про услуги, уход, цены",
-        reply_markup=kb.as_markup()
+        kb.as_markup()
     )
     await cb.answer()
 
@@ -492,11 +513,12 @@ async def ai_photo_start(cb: CallbackQuery, state: FSMContext, ctx: RequestConte
         await cb.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!", show_alert=True)
         return
     await state.set_state(AIConsultFSM.waiting_photo)
-    await cb.message.edit_text(
+    await safe_edit_or_send(
+        cb.message,
         "📸 Отправьте фото лица (портрет, хорошее освещение) —\n"
         "AI подберёт 3 варианта стрижки, актуальных в 2026 году.\n\n"
         "⚠️ Фото используется только для анализа и не сохраняется на сервере.",
-        reply_markup=back_kb()
+        back_kb()
     )
     await cb.answer()
 
@@ -527,7 +549,7 @@ async def ai_photo_process(msg: Message, state: FSMContext, ctx: RequestContext)
         result = await ai_service.generate(prompt, image_bytes=image_bytes, mime_type="image/jpeg")
         register_ai_usage(ctx.user_id)
 
-        await thinking_msg.delete()
+        await safe_delete_message(thinking_msg)
         await msg.answer(
             f"🤖 AI-РЕКОМЕНДАЦИИ ПО СТРИЖКЕ:\n\n{result}\n\n"
             f"💈 Запишитесь к мастеру, чтобы обсудить понравившийся вариант!",
@@ -535,7 +557,7 @@ async def ai_photo_process(msg: Message, state: FSMContext, ctx: RequestContext)
         )
     except Exception as e:
         logger.error(f"AI photo processing error: {e}")
-        await thinking_msg.delete()
+        await safe_delete_message(thinking_msg)
         await msg.answer("❌ Не удалось обработать фото, попробуйте другое изображение.", reply_markup=client_menu())
     finally:
         await state.clear()
@@ -553,10 +575,11 @@ async def ai_ask_start(cb: CallbackQuery, state: FSMContext, ctx: RequestContext
         await cb.answer(f"⏳ Лимит AI-запросов на сегодня ({AI_USAGE_LIMIT_PER_DAY}) исчерпан. Попробуйте завтра!", show_alert=True)
         return
     await state.set_state(AIConsultFSM.waiting_question)
-    await cb.message.edit_text(
+    await safe_edit_or_send(
+        cb.message,
         "❓ Задайте любой вопрос про услуги, стрижки, уход за бородой и т.п. —\n"
         "отвечу как консультант вашего барбершопа.",
-        reply_markup=back_kb()
+        back_kb()
     )
     await cb.answer()
 
@@ -584,11 +607,11 @@ async def ai_ask_process(msg: Message, state: FSMContext, ctx: RequestContext):
         result = await ai_service.generate(prompt)
         register_ai_usage(ctx.user_id)
 
-        await thinking_msg.delete()
+        await safe_delete_message(thinking_msg)
         await msg.answer(f"🤖 {result}", reply_markup=client_menu())
     except Exception as e:
         logger.error(f"AI ask processing error: {e}")
-        await thinking_msg.delete()
+        await safe_delete_message(thinking_msg)
         await msg.answer("❌ Не получилось получить ответ, попробуйте ещё раз.", reply_markup=client_menu())
     finally:
         await state.clear()
@@ -702,7 +725,7 @@ async def handle_rating(cb: CallbackQuery, ctx: RequestContext):
         booking = await c.fetchrow("SELECT master_id FROM bookings WHERE id=$1", booking_id)
         if booking:
             await c.execute("INSERT INTO reviews(booking_id, client_id, master_id, rating) VALUES($1,$2,$3,$4)", booking_id, ctx.user_id, booking["master_id"], rating)
-    await cb.message.edit_text(f"✅ Спасибо за оценку! ⭐ {rating}/5")
+    await safe_edit_or_send(cb.message, f"✅ Спасибо за оценку! ⭐ {rating}/5")
     await cb.answer()
 
 @router.message(CommandStart())
@@ -756,7 +779,7 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
 @router.callback_query(F.data == "create_company")
 async def create_company_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Onboarding.company_name)
-    await cb.message.edit_text("🏪 Создание компании\n\nВведите название компании:", reply_markup=back_kb())
+    await safe_edit_or_send(cb.message, "🏪 Создание компании\n\nВведите название компании:", back_kb())
     await cb.answer()
 
 @router.message(Onboarding.company_name)
@@ -787,10 +810,11 @@ async def create_company_city(cb: CallbackQuery, state: FSMContext):
     city = cb.data.split("_")[1]
     if city == "other":
         await state.set_state(Onboarding.company_city)
-        await cb.message.edit_text(
+        await safe_edit_or_send(
+            cb.message,
             "🌍 Введите название вашего города:\n\n"
             "Например: Казань, Краснодар, Владивосток",
-            reply_markup=back_kb()
+            back_kb()
         )
         await cb.answer()
         return
@@ -798,12 +822,13 @@ async def create_company_city(cb: CallbackQuery, state: FSMContext):
     tz = TIMEZONE_MAP.get(city, "Europe/Moscow")
     await state.update_data(company_city=city, timezone=tz)
     await state.set_state(Onboarding.company_telegram)
-    await cb.message.edit_text(
+    await safe_edit_or_send(
+        cb.message,
         f"✅ Город: {city}\n\n"
         "📱 Telegram компании\n\n"
         "Введите ссылку (например @barbershop):\n"
         "Можно пропустить, отправив '-'",
-        reply_markup=back_kb()
+        back_kb()
     )
     await cb.answer()
 
@@ -871,7 +896,7 @@ async def create_company_phone(msg: Message, state: FSMContext, ctx: RequestCont
 @router.callback_query(F.data == "join_company")
 async def join_company_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(JoinCompanyFSM.invite_code)
-    await cb.message.edit_text("🔑 Вход в компанию\n\nВведите код приглашения:", reply_markup=back_kb())
+    await safe_edit_or_send(cb.message, "🔑 Вход в компанию\n\nВведите код приглашения:", back_kb())
     await cb.answer()
 
 @router.message(JoinCompanyFSM.invite_code)
@@ -903,13 +928,21 @@ async def show_invite_code(cb: CallbackQuery, ctx: RequestContext):
     if not company:
         await cb.answer("❌ Компания не найдена")
         return
-    await cb.message.edit_text(f"🔑 Код приглашения:\n\n`{company['invite_code']}`\n\nОтправьте этот код клиентам.", reply_markup=back_kb())
+    await safe_edit_or_send(
+        cb.message,
+        f"🔑 Код приглашения:\n\n`{company['invite_code']}`\n\nОтправьте этот код клиентам.",
+        back_kb()
+    )
     await cb.answer()
 
 @router.callback_query(F.data == "edit_contacts")
 async def edit_contacts_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(EditContactsFSM.telegram)
-    await cb.message.edit_text("✏️ Редактирование контактов\n\nВведите Telegram (можно пропустить, отправив '-'):", reply_markup=back_kb())
+    await safe_edit_or_send(
+        cb.message,
+        "✏️ Редактирование контактов\n\nВведите Telegram (можно пропустить, отправив '-'):",
+        back_kb()
+    )
     await cb.answer()
 
 @router.message(EditContactsFSM.telegram)
@@ -939,11 +972,23 @@ async def edit_contacts_phone(msg: Message, state: FSMContext, ctx: RequestConte
 async def main_menu_screen(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
     await state.clear()
     if ctx.role == "owner":
-        await cb.message.edit_text(f"🏠 Главное меню\n\n👑 {ctx.role.upper()} | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}", reply_markup=owner_menu(ctx))
+        await safe_edit_or_send(
+            cb.message,
+            f"🏠 Главное меню\n\n👑 {ctx.role.upper()} | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
+            owner_menu(ctx)
+        )
     elif ctx.role == "client":
-        await cb.message.edit_text(f"🏠 Главное меню\n\n👤 КЛИЕНТ | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}", reply_markup=client_menu())
+        await safe_edit_or_send(
+            cb.message,
+            f"🏠 Главное меню\n\n👤 КЛИЕНТ | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
+            client_menu()
+        )
     else:
-        await cb.message.edit_text(f"🏠 Главное меню\n\n👨‍🔧 МАСТЕР | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}", reply_markup=master_menu())
+        await safe_edit_or_send(
+            cb.message,
+            f"🏠 Главное меню\n\n👨‍🔧 МАСТЕР | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
+            master_menu()
+        )
     await cb.answer()
 
 @router.callback_query(F.data == "bookings_screen")
@@ -955,7 +1000,7 @@ async def bookings_screen(cb: CallbackQuery, ctx: RequestContext):
         kb.button(text="📋 Все записи", callback_data="all_bookings")
     kb.button(text="⬅️ Назад", callback_data="main_menu")
     kb.adjust(1)
-    await cb.message.edit_text("📅 Управление записями", reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, "📅 Управление записями", kb.as_markup())
     await cb.answer()
 
 @router.callback_query(F.data == "masters_screen")
@@ -974,13 +1019,13 @@ async def masters_screen(cb: CallbackQuery, ctx: RequestContext):
     text = f"👨‍🔧 Мастера ({len(masters)}/{MASTER_LIMITS.get(ctx.plan, 1)})\n\n"
     for m in masters:
         text += f"• {m['name']}\n"
-    await cb.message.edit_text(text, reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, text, kb.as_markup())
     await cb.answer()
 
 @router.callback_query(F.data == "add_master_screen")
 async def add_master_screen(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AddMasterFSM.name)
-    await cb.message.edit_text("👨‍🔧 Введите имя мастера:", reply_markup=back_kb())
+    await safe_edit_or_send(cb.message, "👨‍🔧 Введите имя мастера:", back_kb())
     await cb.answer()
 
 @router.message(AddMasterFSM.name)
@@ -1027,13 +1072,17 @@ async def services_screen(cb: CallbackQuery, ctx: RequestContext):
     text = f"💈 Услуги ({len(services)})\n\n"
     for s in services:
         text += f"• {s['name']} — {s['price']}₽ ({s['duration']} мин)\n"
-    await cb.message.edit_text(text, reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, text, kb.as_markup())
     await cb.answer()
 
 @router.callback_query(F.data == "add_service")
 async def add_service_name(cb: CallbackQuery, state: FSMContext):
     await state.set_state(ServiceFSM.name)
-    await cb.message.edit_text("💈 Введите название услуги:\n\nПример: Окрашивание бороды", reply_markup=back_kb())
+    await safe_edit_or_send(
+        cb.message,
+        "💈 Введите название услуги:\n\nПример: Окрашивание бороды",
+        back_kb()
+    )
     await cb.answer()
 
 @router.message(ServiceFSM.name)
@@ -1088,7 +1137,7 @@ async def billing_screen(cb: CallbackQuery, ctx: RequestContext):
         "🔥 ПРО (990₽) — 1000 записей + аналитика + 🤖 AI-консультант\n"
         "👑 БИЗНЕС (1490₽) — безлимит + экспорт + 🤖 AI-консультант"
     )
-    await cb.message.edit_text(text, reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, text, kb.as_markup())
     await cb.answer()
 
 @router.callback_query(F.data.startswith("pay_"))
@@ -1097,7 +1146,12 @@ async def pay_activate(cb: CallbackQuery, ctx: RequestContext):
     limit = PLAN_LIMITS.get(plan, 0)
     price = PLAN_PRICES.get(plan, 0)
     plan_name = PLAN_NAMES.get(plan, plan.upper())
-    await cb.message.edit_text(f"💳 ОПЛАТА {plan_name}\n\n💰 {price}₽/мес\n📊 Лимит записей: {limit}\n🏦 `{YOOMONEY_WALLET}`\n\n1. Переведи сумму\n2. Напиши сюда: {ADMIN_USERNAME}\n3. Скажи какой тариф выбрал\n\n⚡ После оплаты активирую за 5 минут", reply_markup=back_kb())
+    await safe_edit_or_send(
+        cb.message,
+        f"💳 ОПЛАТА {plan_name}\n\n💰 {price}₽/мес\n📊 Лимит записей: {limit}\n🏦 `{YOOMONEY_WALLET}`\n\n1. Переведи сумму\n2. Напиши сюда: {ADMIN_USERNAME}\n3. Скажи какой тариф выбрал\n\n⚡ После оплаты активирую за 5 минут",
+        back_kb()
+    )
+    await cb.answer()
 
 @router.callback_query(F.data == "analytics")
 async def analytics(cb: CallbackQuery, ctx: RequestContext):
@@ -1179,7 +1233,7 @@ async def analytics(cb: CallbackQuery, ctx: RequestContext):
     else:
         text += "Нет данных\n"
     
-    await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb())
+    await safe_edit_or_send(cb.message, text, parse_mode="Markdown", reply_markup=back_kb())
     await cb.answer()
 
 @router.callback_query(F.data == "book")
@@ -1202,7 +1256,7 @@ async def book_start(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
         kb.button(text=f"💈 {m['name']}", callback_data=f"m_{m['id']}")
     kb.button(text="🏠 Главная", callback_data="main_menu")
     kb.adjust(1)
-    await cb.message.edit_text("👨‍🔧 ВЫБЕРИТЕ МАСТЕРА:", reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, "👨‍🔧 ВЫБЕРИТЕ МАСТЕРА:", kb.as_markup())
     await cb.answer()
 
 @router.callback_query(BookFSM.master, F.data.startswith("m_"))
@@ -1220,7 +1274,7 @@ async def book_master(cb: CallbackQuery, state: FSMContext, ctx: RequestContext)
         kb.button(text=f"💈 {s['name']} — {s['price']}₽", callback_data=f"s_{s['id']}")
     kb.button(text="◀️ Назад", callback_data="book")
     kb.adjust(1)
-    await cb.message.edit_text("💈 ВЫБЕРИТЕ УСЛУГУ:", reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, "💈 ВЫБЕРИТЕ УСЛУГУ:", kb.as_markup())
     await cb.answer()
 
 @router.callback_query(BookFSM.service, F.data.startswith("s_"))
@@ -1236,7 +1290,7 @@ async def book_date(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
         kb.button(text=day.strftime("%d.%m (%a)"), callback_data=f"date_{day.strftime('%Y-%m-%d')}")
     kb.button(text="◀️ Назад", callback_data="book")
     kb.adjust(2)
-    await cb.message.edit_text("📅 ВЫБЕРИТЕ ДАТУ:", reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, "📅 ВЫБЕРИТЕ ДАТУ:", kb.as_markup())
     await cb.answer()
 
 @router.callback_query(BookFSM.date, F.data.startswith("date_"))
@@ -1253,7 +1307,7 @@ async def book_time(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
             kb.button(text=f"⏰ {h}:00", callback_data=f"t_{h}")
     kb.button(text="◀️ Назад", callback_data="book")
     kb.adjust(3)
-    await cb.message.edit_text(f"📅 {date_str}\n\n⏰ Выберите время:", reply_markup=kb.as_markup())
+    await safe_edit_or_send(cb.message, f"📅 {date_str}\n\n⏰ Выберите время:", kb.as_markup())
     await cb.answer()
 
 @router.callback_query(BookFSM.time, F.data.startswith("t_"))
@@ -1292,7 +1346,11 @@ async def book_done(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
                     await bot.send_message(master["telegram_id"], f"📅 НОВАЯ ЗАПИСЬ!\n\n💇 {service['name']}\n📅 {start.strftime('%d.%m.%Y %H:%M')}\n🆔 #{bid}")
                 except:
                     pass
-        await cb.message.edit_text(f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n\n🆔 #{bid}\n📅 {start.strftime('%d.%m.%Y')}\n⏰ {start.strftime('%H:%M')}", reply_markup=back_kb())
+        await safe_edit_or_send(
+            cb.message,
+            f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n\n🆔 #{bid}\n📅 {start.strftime('%d.%m.%Y')}\n⏰ {start.strftime('%H:%M')}",
+            back_kb()
+        )
         await state.clear()
     except Exception as e:
         logger.error(f"Booking error: {e}")
@@ -1310,7 +1368,7 @@ async def my_bookings(cb: CallbackQuery, ctx: RequestContext):
             ORDER BY b.start_time
         """, ctx.user_id, ctx.company_id)
     if not rows:
-        await cb.message.edit_text("📋 Нет записей.", reply_markup=back_kb())
+        await safe_edit_or_send(cb.message, "📋 Нет записей.", back_kb())
     else:
         tz = pytz_timezone(ctx.timezone)
         kb = InlineKeyboardBuilder()
@@ -1324,7 +1382,7 @@ async def my_bookings(cb: CallbackQuery, ctx: RequestContext):
                 kb.button(text=f"❌ Отменить #{r['id']}", callback_data=f"cancel_{r['id']}")
         kb.button(text="⬅️ Назад", callback_data="main_menu")
         kb.adjust(1)
-        await cb.message.edit_text(text, reply_markup=kb.as_markup())
+        await safe_edit_or_send(cb.message, text, kb.as_markup())
     await cb.answer()
 
 @router.callback_query(F.data == "all_bookings")
@@ -1334,14 +1392,14 @@ async def all_bookings(cb: CallbackQuery, ctx: RequestContext):
         return
     rows = await db.get_all_bookings(ctx.company_id)
     if not rows:
-        await cb.message.edit_text("📋 Нет активных записей.", reply_markup=back_kb())
+        await safe_edit_or_send(cb.message, "📋 Нет активных записей.", back_kb())
     else:
         tz = pytz_timezone(ctx.timezone)
         text = "📋 ВСЕ ЗАПИСИ:\n\n"
         for r in rows:
             start_tz = r['start_time'].astimezone(tz) if r['start_time'].tzinfo else r['start_time'].replace(tzinfo=tz)
             text += f"✅ #{r['id']} — {r['service_name']}\n👨‍🔧 {r['master_name']}\n📅 {start_tz.strftime('%d.%m.%Y %H:%M')}\n\n"
-        await cb.message.edit_text(text, reply_markup=back_kb())
+        await safe_edit_or_send(cb.message, text, back_kb())
     await cb.answer()
 
 @router.callback_query(F.data.startswith("repeat_"))
@@ -1360,7 +1418,7 @@ async def repeat_booking(cb: CallbackQuery, state: FSMContext, ctx: RequestConte
                 kb.button(text=day.strftime("%d.%m (%a)"), callback_data=f"date_{day.strftime('%Y-%m-%d')}")
             kb.button(text="◀️ Назад", callback_data="my_bookings")
             kb.adjust(2)
-            await cb.message.edit_text("📅 ВЫБЕРИТЕ ДАТУ ДЛЯ ПОВТОРА:", reply_markup=kb.as_markup())
+            await safe_edit_or_send(cb.message, "📅 ВЫБЕРИТЕ ДАТУ ДЛЯ ПОВТОРА:", kb.as_markup())
         else:
             await cb.answer("❌ Не удалось повторить запись", show_alert=True)
     await cb.answer()
@@ -1396,7 +1454,11 @@ async def contact(cb: CallbackQuery, ctx: RequestContext):
     telegram = company["telegram"] if company and company["telegram"] else "Не указан"
     address = company["address"] if company and company["address"] else "Не указан"
     phone = company["phone"] if company and company["phone"] else "Не указан"
-    await cb.message.edit_text(f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}\n📞 {phone}", reply_markup=back_kb())
+    await safe_edit_or_send(
+        cb.message,
+        f"📞 КОНТАКТЫ\n\n💬 {telegram}\n📍 {address}\n📞 {phone}",
+        back_kb()
+    )
     await cb.answer()
 
 @router.message(Command("help"))
