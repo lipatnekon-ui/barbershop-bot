@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BarberShopAdministration — gemini ai
+BarberShopAdministration — gemini ai with photos
 """
 import asyncio, asyncpg, os, time, logging, secrets, csv, io, base64, aiohttp, pytz, qrcode
 from pytz import timezone as pytz_timezone
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot, Dispatcher, F, BaseMiddleware, Router
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, FSInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -30,7 +30,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 AI_USAGE_LIMIT_PER_DAY = int(os.getenv("AI_USAGE_LIMIT_PER_DAY", "10"))
-AI_USAGE = defaultdict(list)  # uid -> [timestamps]
+AI_USAGE = defaultdict(list)
+
+# Добавь переменную для URL фото
+LOGO_URL = os.getenv("LOGO_URL", "")
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
     raise ValueError("❌ Неверный BOT_TOKEN")
@@ -46,10 +49,8 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 app = FastAPI(title="👑 EMPIRE SAAS V17")
 
-# Московское время (по умолчанию)
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
-# Словарь городов и их часовых поясов
 TIMEZONE_MAP = {
     "Москва": "Europe/Moscow",
     "Санкт-Петербург": "Europe/Moscow",
@@ -82,6 +83,27 @@ USER_CACHE = {}
 REFERRAL_CODES = {}
 BOT_USERNAME = None
 
+# Путь к фото
+IMAGES_PATH = "images"
+DEFAULT_LOGO = os.path.join(IMAGES_PATH, "barbershop_logo.jpg")
+DEFAULT_WELCOME = os.path.join(IMAGES_PATH, "welcome.jpg")
+
+# Создаем папку если её нет
+os.makedirs(IMAGES_PATH, exist_ok=True)
+
+async def get_image_from_url(url):
+    """Скачивает изображение по URL"""
+    if not url:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+    except Exception as e:
+        logger.error(f"Error downloading image: {e}")
+    return None
+
 def generate_ref_code(uid):
     code = secrets.token_urlsafe(6)
     REFERRAL_CODES[code] = uid
@@ -95,21 +117,33 @@ class RequestContext:
     plan: str = "free"
     timezone: str = "Europe/Moscow"
 
-async def safe_edit_or_send(message: Message, text: str, reply_markup=None):
-    """Безопасно редактирует сообщение или отправляет новое при ошибке"""
+async def safe_edit_or_send(message: Message, text: str, reply_markup=None, photo_path=None):
+    """Безопасно редактирует или отправляет сообщение с фото"""
     try:
-        await message.edit_text(text, reply_markup=reply_markup)
+        # Пробуем отредактировать
+        if message.photo:
+            await message.edit_caption(caption=text, reply_markup=reply_markup)
+        else:
+            await message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
-        # Если редактирование невозможно (нет текста или сообщение удалено)
+        # Если не получилось - удаляем и отправляем новое
         try:
             await message.delete()
         except:
             pass
-        # Отправляем новое сообщение
-        await message.answer(text, reply_markup=reply_markup)
+        
+        # Отправляем с фото если есть
+        if photo_path and os.path.exists(photo_path):
+            with open(photo_path, "rb") as f:
+                await message.answer_photo(
+                    BufferedInputFile(f.read(), filename="image.jpg"),
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+        else:
+            await message.answer(text, reply_markup=reply_markup)
 
 async def safe_delete_message(message: Message):
-    """Безопасно удаляет сообщение"""
     try:
         await message.delete()
     except:
@@ -313,13 +347,6 @@ db = DB()
 
 # ==================== AI-СЕРВИС (Gemini) ====================
 class AIService:
-    """
-    Тонкая обёртка над Gemini REST API (generateContent).
-    Работает и в текстовом, и в мультимодальном (фото) режиме.
-    Никогда не бросает исключение наружу — при любой ошибке возвращает
-    дружелюбное сообщение, чтобы бот не падал из-за внешнего API.
-    """
-
     def __init__(self, api_key: str, url: str):
         self.api_key = api_key
         self.url = url
@@ -341,7 +368,7 @@ class AIService:
         headers = {"Content-Type": "application/json"}
         params = {"key": self.api_key}
 
-        for attempt in range(2):  # одна попытка + один retry при 429/5xx
+        for attempt in range(2):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -435,6 +462,51 @@ def generate_header(company_name, current_plan):
     plan_name = PLAN_NAMES.get(current_plan, "FREE")
     limit = PLAN_LIMITS.get(current_plan, 0)
     return f"👑 EMPIRE SAAS\n🏢 {company_name}\n📊 Тариф: {plan_name}\n📈 Лимит: {limit} записей/мес"
+
+async def send_main_menu_with_photo(message: Message, ctx: RequestContext):
+    """Универсальная функция отправки главного меню с фото"""
+    company = await db.get_company(ctx.company_id) if ctx.company_id else None
+    header = generate_header(company["name"] if company else "Барбершоп", ctx.plan) if company else ""
+    
+    if ctx.role == "owner":
+        ref_code = generate_ref_code(ctx.user_id)
+        ref_link = f"\n\n🔗 Реферальная ссылка: t.me/{BOT_USERNAME}?start={ref_code}"
+        text = f"{header}{ref_link}\n\n🏠 Главное меню\n\n👑 {ctx.role.upper()} | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}"
+        reply_markup = owner_menu(ctx)
+    elif ctx.role == "client":
+        text = f"{header}\n\n🏠 Главное меню\n\n👤 КЛИЕНТ | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}"
+        reply_markup = client_menu()
+    else:  # master
+        text = f"{header}\n\n🏠 Главное меню\n\n👨‍🔧 МАСТЕР | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}"
+        reply_markup = master_menu()
+    
+    # Пробуем скачать фото по URL
+    photo_bytes = None
+    if LOGO_URL:
+        photo_bytes = await get_image_from_url(LOGO_URL)
+    
+    # Если URL не сработал, пробуем локальное фото
+    if not photo_bytes and os.path.exists(DEFAULT_LOGO):
+        with open(DEFAULT_LOGO, "rb") as f:
+            photo_bytes = f.read()
+    
+    # Если нет фото - пробуем другие форматы
+    if not photo_bytes:
+        for ext in ['.png', '.jpg', '.jpeg', '.webp']:
+            path = f"images/barbershop_logo{ext}"
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    photo_bytes = f.read()
+                break
+    
+    if photo_bytes:
+        await message.answer_photo(
+            BufferedInputFile(photo_bytes, filename="logo.png"),
+            caption=text,
+            reply_markup=reply_markup
+        )
+    else:
+        await message.answer(text, reply_markup=reply_markup)
 
 # ==================== QR-ГЕНЕРАЦИЯ ====================
 @router.callback_query(F.data == "generate_qr")
@@ -728,6 +800,7 @@ async def handle_rating(cb: CallbackQuery, ctx: RequestContext):
     await safe_edit_or_send(cb.message, f"✅ Спасибо за оценку! ⭐ {rating}/5")
     await cb.answer()
 
+# ==================== ОСНОВНОЙ START ====================
 @router.message(CommandStart())
 async def start(msg: Message, state: FSMContext, ctx: RequestContext):
     args = msg.text.split()
@@ -749,32 +822,33 @@ async def start(msg: Message, state: FSMContext, ctx: RequestContext):
                         timezone=comp["timezone"] if comp else "Europe/Moscow"
                     )
                     await msg.answer("✅ Вы автоматически присоединились к компании!")
+    
     await db.create_user(ctx.user_id)
     await state.clear()
     
     if ctx.company_id:
-        company = await db.get_company(ctx.company_id)
-        header = generate_header(company["name"], ctx.plan)
-        async with db.pool.acquire() as c:
-            is_master = await c.fetchval("SELECT id FROM masters WHERE telegram_id=$1 AND company_id=$2", msg.from_user.id, ctx.company_id)
-        if is_master and ctx.role != "owner":
-            await msg.answer(f"{header}\n👇 Панель мастера:", reply_markup=master_menu())
-        elif ctx.role == "owner":
-            ref_code = generate_ref_code(ctx.user_id)
-            ref_link = f"\n\n🔗 Реферальная ссылка: t.me/{BOT_USERNAME}?start={ref_code}"
-            await msg.answer(f"{header}{ref_link}\n👇 Панель владельца:", reply_markup=owner_menu(ctx))
-        else:
-            await msg.answer(f"{header}\n👇 Доступные действия:", reply_markup=client_menu())
+        # Отправляем главное меню с фото
+        await send_main_menu_with_photo(msg, ctx)
         return
     
+    # Для новых пользователей без компании
     kb = InlineKeyboardBuilder()
     kb.button(text="🏪 Создать компанию", callback_data="create_company")
     kb.button(text="🔑 Войти по коду", callback_data="join_company")
     kb.adjust(1)
-    await msg.answer(
-        "👑 EMPIRE SAAS V17\n\nУ вас ещё нет компании.\n\n• Создать — стать владельцем бизнеса\n• Войти по коду — клиентом к существующей компании\n\n📚 /help — справка\n\n💰 Тарифы: СТАРТ 490₽/мес | ПРО 990₽/мес (+AI) | БИЗНЕС 1490₽/мес (+AI)",
-        reply_markup=kb.as_markup()
-    )
+    
+    photo_path = DEFAULT_WELCOME if os.path.exists(DEFAULT_WELCOME) else None
+    text = "👑 EMPIRE SAAS V17\n\nУ вас ещё нет компании.\n\n• Создать — стать владельцем бизнеса\n• Войти по коду — клиентом к существующей компании\n\n📚 /help — справка\n\n💰 Тарифы: СТАРТ 490₽/мес | ПРО 990₽/мес (+AI) | БИЗНЕС 1490₽/мес (+AI)"
+    
+    if photo_path:
+        with open(photo_path, "rb") as f:
+            await msg.answer_photo(
+                BufferedInputFile(f.read(), filename="welcome.jpg"),
+                caption=text,
+                reply_markup=kb.as_markup()
+            )
+    else:
+        await msg.answer(text, reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "create_company")
 async def create_company_start(cb: CallbackQuery, state: FSMContext):
@@ -970,25 +1044,17 @@ async def edit_contacts_phone(msg: Message, state: FSMContext, ctx: RequestConte
 # ==================== ОСНОВНЫЕ ЭКРАНЫ ====================
 @router.callback_query(F.data == "main_menu")
 async def main_menu_screen(cb: CallbackQuery, state: FSMContext, ctx: RequestContext):
+    """Главное меню - всегда показывает полную информацию с фото"""
     await state.clear()
-    if ctx.role == "owner":
-        await safe_edit_or_send(
-            cb.message,
-            f"🏠 Главное меню\n\n👑 {ctx.role.upper()} | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
-            owner_menu(ctx)
-        )
-    elif ctx.role == "client":
-        await safe_edit_or_send(
-            cb.message,
-            f"🏠 Главное меню\n\n👤 КЛИЕНТ | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
-            client_menu()
-        )
-    else:
-        await safe_edit_or_send(
-            cb.message,
-            f"🏠 Главное меню\n\n👨‍🔧 МАСТЕР | 💳 {PLAN_NAMES.get(ctx.plan, 'FREE')}",
-            master_menu()
-        )
+    
+    # Удаляем старое сообщение
+    try:
+        await cb.message.delete()
+    except:
+        pass
+    
+    # Отправляем новое меню с фото
+    await send_main_menu_with_photo(cb.message, ctx)
     await cb.answer()
 
 @router.callback_query(F.data == "bookings_screen")
@@ -1576,6 +1642,8 @@ async def main():
     print("🔄 Повтор записи работает")
     print("💈 Барбер сам добавляет услуги")
     print("🕐 Московское время (UTC+3)")
+    print(f"📁 Папка с фото: {IMAGES_PATH}")
+    print(f"📸 Логотип: {'✅ найдено' if os.path.exists(DEFAULT_LOGO) else '❌ не найдено'}")
     await asyncio.gather(
         run_api(), 
         dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
